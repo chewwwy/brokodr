@@ -394,4 +394,48 @@ zero console errors.
 Repo initialised (`main`, 195 files, one commit). `.gitignore` gained
 `!scripts/verify-dsp.mjs` — the template ignores all of `scripts/`, but the Actions build
 runs that suite so it must be in the repo. `.env` is correctly ignored.
-Waiting on Kane's PAT to create the remote and push.
+Pushed to **https://github.com/chewwwy/brokodr** (public). Token account is `chewwwy`, not
+`kanebateman` - confirmed with Kane before creating.
+
+Repo secret `GOOGLE_GENERATIVE_AI_API_KEY` set via the Actions secrets API (sealed box), because
+`bun run build` needs it for the Voice Lab route.
+
+Repo was created private first, but a private-repo run sat `queued` for 13 min with zero jobs
+allocated (no Actions minutes available on the account). Flipped to public on Kane's instruction -
+public repos get unlimited free Actions minutes - and the run started immediately.
+
+### Three CI failures fixed to get the first green build
+1. `.gitignore` also swallowed `packages/desktop/scripts/copy-web-dist.mjs` (the `scripts/`
+   pattern matches at any depth, and the round-1 fix only un-ignored the root
+   `scripts/verify-dsp.mjs`). The desktop `build` script imports it, so CI failed with
+   `Module not found`. Added the mobile-style un-ignore triple for that one file.
+2. `electron-builder` hard-failed with `Cannot detect repository by .git/config`: it tries to
+   derive a publish/auto-update target on CI. Added **`"publish": null`** to
+   `electron-builder.json5` - CI ships the .exe as a build artifact, not a GitHub release.
+3. (config, not a failure) `protocols[0].schemes` set to the real
+   **`runable-vowkodr-xzbcl8r`** on Kane's instruction, replacing the `runable-app` placeholder.
+   That matches what `createManagedDeepLinks` derives from `APPLICATION_ID` at runtime. A vanity
+   `brokodr://` scheme was discussed and deliberately deferred until there are preset links worth
+   sharing.
+
+### First Windows installer - SHIPPED
+Run 32986421790 green. `Bro.Kodr-Windows-0.0.0-Setup.exe`, 100.8 MB, NSIS x64, per-user,
+install dir selectable.
+
+Published as a **prerelease** so it has a permanent no-login download URL (the raw Actions
+artifact needs a GitHub login, and `upload` rejects anything this large):
+https://github.com/chewwwy/brokodr/releases/download/v0.0.0-alpha.1/Bro.Kodr-Windows-0.0.0-Setup.exe
+
+Still true: the build is **unsigned**, so SmartScreen warns on first run.
+
+Note: creating tag `v0.0.0-alpha.1` re-triggers the workflow (it fires on `v*`). Harmless
+duplicate build.
+
+### Next on the .exe
+- Wire the marketing-site download button (`pages/site.tsx` ~line 295, currently the disabled
+  `Windows .exe - soon`) to that release URL. Not done - it needs Kane's go-ahead since it
+  publishes an unsigned build to anyone who visits the site.
+- `version` is still `0.0.0` from the template, so the filename reads `0.0.0`. Worth setting a
+  real version before a public download link goes live.
+- No app icon (`electron-builder.json5` has no `icon` key), so the installer and taskbar use the
+  default Electron icon.

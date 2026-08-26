@@ -373,3 +373,10 @@ and the mix strip are square, and without it their corners punch back through th
 plate. Module widths gained 6px (208 -> 214, 268 -> 274) so the control area inside is
 unchanged. `.vk-grad-face` is no longer applied to modules: `.mk-face` carries the same
 gradient, so the background-only class is now unused.
+
+### Module headers (round 5c)
+The vocoder now wears the same `.vk-tone-head` category bar as every other module, expanded
+and collapsed. Its engraved nameplate was the last piece of the original one-off metal
+treatment, and it left the vocoder as the only module in the chain with no colour box — the
+one module you could not place by category at a glance. The plate keeps `overflow-hidden` so
+the square header clips to the 10px radius.

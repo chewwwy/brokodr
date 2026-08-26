@@ -384,3 +384,14 @@ Verified: `bun run build` green (6.6s), Playwright harness zero console errors,
 renders chassis + inset rounded plate exactly like `MetalVocoderModule`, widths +6px,
 `overflow-hidden` on the plate so the square header clips to the radius.
 Verified: `bun run build` green (6.7s), harness zero console errors, DSP 193/193.
+
+## Round 5c — vocoder header unified, 2026-08-26
+Engraved nameplate replaced with the shared `.vk-tone-head` category bar (voice = #a78bfa),
+in both the expanded and collapsed states. Verified: `bun run build` green (6.9s), harness
+zero console errors.
+
+## Git / GitHub — 2026-08-26
+Repo initialised (`main`, 195 files, one commit). `.gitignore` gained
+`!scripts/verify-dsp.mjs` — the template ignores all of `scripts/`, but the Actions build
+runs that suite so it must be in the repo. `.env` is correctly ignored.
+Waiting on Kane's PAT to create the remote and push.

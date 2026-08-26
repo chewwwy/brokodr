@@ -77,6 +77,11 @@ packages/mobile/scripts/*
 # the GitHub Actions build runs it, so it has to be in the repo.
 !scripts/verify-dsp.mjs
 
+# ...and the desktop package's build step imports this one, so it must ship too.
+!packages/desktop/scripts/
+packages/desktop/scripts/*
+!packages/desktop/scripts/copy-web-dist.mjs
+
 # Built web assets copied into the desktop package at build time (see
 # packages/desktop/scripts/copy-web-dist.mjs) — generated, never edited by hand.
 web-dist

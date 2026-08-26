@@ -20,6 +20,11 @@
     "dist-electron",
     "web-dist"
   ],
+
+  // No auto-update / GitHub release publishing: CI uploads the .exe as a build artifact.
+  // Without this, electron-builder tries to derive a publish target from .git/config and
+  // hard-fails on CI with "Cannot detect repository by .git/config".
+  "publish": null,
   // PLACEHOLDER — packaged-build deep links (and desktop managed sign-in) DO NOT WORK until this
   // scheme is replaced with the app's real `runable-<applicationId>` (the value main.ts derives at
   // runtime from APPLICATION_ID). Dev builds register the protocol at runtime and ignore this.

@@ -1,0 +1,859 @@
+@import "tailwindcss";
+
+/*
+ * Bro.Kodr — design tokens. See design.md.
+ *
+ * The aesthetic is pro-audio hardware: console greys, engraved labels, amber signal
+ * accents. Deliberately almost no transitions — anything that repaints while audio is
+ * running costs frames, and dropped frames on the UI thread eventually cost audio.
+ */
+
+@font-face {
+  font-family: "Chakra Petch";
+  src: local("Chakra Petch");
+}
+
+:root {
+  --vk-void: #08090a;
+  --vk-panel: #16181b;
+  --vk-panel-hi: #1e2126;
+  --vk-panel-lo: #101215;
+  --vk-line: #2a2e34;
+  --vk-line-hi: #3a4048;
+
+  --vk-text: #e8eaed;
+  --vk-text-mid: #9aa2ad;
+  --vk-text-dim: #5f6772;
+
+  --vk-amber: #ffb020;
+  --vk-amber-dim: #6b4a10;
+  --vk-cyan: #35d6d0;
+  --vk-cyan-dim: #12504f;
+  --vk-green: #4ade80;
+  --vk-red: #ff3b30;
+  --vk-violet: #a78bfa;
+
+  --font-display: "Chakra Petch", "Inter Tight", system-ui, sans-serif;
+  --font-body: "Inter Tight", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--vk-void);
+  color: var(--vk-text);
+  font-family: var(--font-body);
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Scrollbars: thin, dark, always the same width so layout never shifts. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--vk-panel-lo);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--vk-line-hi);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4a515a;
+}
+
+/* ------------------------------------------------------------------ surfaces */
+
+.vk-panel {
+  background: var(--vk-panel);
+  border: 1px solid var(--vk-line);
+  border-radius: 3px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%);
+}
+
+.vk-well {
+  background: var(--vk-panel-lo);
+  border: 1px solid #000;
+  border-radius: 2px;
+  box-shadow: inset 0 1px 3px rgb(0 0 0 / 60%);
+}
+
+/* ------------------------------------------------------------------ type */
+
+.vk-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--vk-text-dim);
+  line-height: 1.2;
+}
+
+.vk-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.vk-value {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--vk-text);
+}
+
+.vk-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.vk-display {
+  font-family: var(--font-display);
+  letter-spacing: 0.04em;
+}
+
+/* ------------------------------------------------------------------ controls */
+
+.vk-btn {
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vk-text-mid);
+  background: var(--vk-panel-hi);
+  border: 1px solid var(--vk-line-hi);
+  border-radius: 2px;
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.vk-btn:hover:not(:disabled) {
+  color: var(--vk-text);
+  border-color: #4a515a;
+}
+.vk-btn:active:not(:disabled) {
+  background: var(--vk-panel-lo);
+}
+.vk-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.vk-btn[data-active="true"] {
+  color: var(--vk-void);
+  background: var(--vk-amber);
+  border-color: var(--vk-amber);
+}
+.vk-btn[data-tone="danger"][data-active="true"] {
+  background: var(--vk-red);
+  border-color: var(--vk-red);
+  color: #fff;
+}
+.vk-btn[data-tone="cyan"][data-active="true"] {
+  background: var(--vk-cyan);
+  border-color: var(--vk-cyan);
+  color: var(--vk-void);
+}
+
+.vk-select {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--vk-text);
+  background: var(--vk-panel-lo);
+  border: 1px solid var(--vk-line-hi);
+  border-radius: 2px;
+  padding: 3px 4px;
+  width: 100%;
+  cursor: pointer;
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--vk-text-dim) 50%),
+    linear-gradient(135deg, var(--vk-text-dim) 50%, transparent 50%);
+  background-position: calc(100% - 10px) calc(50% + 1px), calc(100% - 6px) calc(50% + 1px);
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+  padding-right: 16px;
+}
+.vk-select:focus {
+  outline: none;
+  border-color: var(--vk-amber);
+}
+
+.vk-input {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--vk-text);
+  background: var(--vk-panel-lo);
+  border: 1px solid var(--vk-line-hi);
+  border-radius: 2px;
+  padding: 4px 6px;
+  width: 100%;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.vk-input:focus {
+  outline: none;
+  border-color: var(--vk-amber);
+}
+
+/* LED dot used on bypass switches and status indicators. */
+.vk-led {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #23262b;
+  box-shadow: inset 0 0 2px #000;
+  flex: none;
+}
+.vk-led[data-on="true"] {
+  background: var(--vk-amber);
+  box-shadow: 0 0 5px var(--vk-amber);
+}
+.vk-led[data-tone="green"][data-on="true"] {
+  background: var(--vk-green);
+  box-shadow: 0 0 5px var(--vk-green);
+}
+.vk-led[data-tone="red"][data-on="true"] {
+  background: var(--vk-red);
+  box-shadow: 0 0 5px var(--vk-red);
+}
+.vk-led[data-tone="cyan"][data-on="true"] {
+  background: var(--vk-cyan);
+  box-shadow: 0 0 5px var(--vk-cyan);
+}
+
+/* Knob interaction: cursor feedback only, no transitions. */
+.vk-knob {
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.vk-drag-handle {
+  cursor: grab;
+}
+.vk-drag-handle:active {
+  cursor: grabbing;
+}
+
+.vk-scroll-x {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.vk-focus-ring:focus-visible {
+  outline: 1px solid var(--vk-amber);
+  outline-offset: 1px;
+}
+
+/* Module being dragged in the rack. */
+.vk-dragging {
+  opacity: 0.35;
+}
+.vk-drop-target {
+  box-shadow: inset 2px 0 0 var(--vk-amber);
+}
+
+/*
+ * STANDBY pulse. The engage button is the one control that matters before audio runs, so
+ * when the engine is off it breathes amber instead of sitting inert. box-shadow/border
+ * only, no transform and no layout, and it exists only while the engine is stopped, so it
+ * can never cost a frame while audio is live.
+ */
+@keyframes vk-standby-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 176, 32, 0), inset 0 0 6px rgba(255, 176, 32, 0.1);
+    border-color: var(--vk-amber-dim);
+    color: var(--vk-text-mid);
+  }
+  50% {
+    box-shadow: 0 0 12px 1px rgba(255, 176, 32, 0.42), inset 0 0 10px rgba(255, 176, 32, 0.22);
+    border-color: var(--vk-amber);
+    color: var(--vk-amber);
+  }
+}
+
+@keyframes vk-standby-led {
+  0%,
+  100% {
+    background: var(--vk-amber-dim);
+    box-shadow: none;
+  }
+  50% {
+    background: var(--vk-amber);
+    box-shadow: 0 0 6px var(--vk-amber);
+  }
+}
+
+.vk-btn.vk-standby {
+  animation: vk-standby-breathe 2s ease-in-out infinite;
+}
+
+.vk-btn.vk-standby .vk-led {
+  background: var(--vk-amber-dim);
+  animation: vk-standby-led 2s ease-in-out infinite;
+}
+
+/* Respect the OS setting - a pulsing control is exactly what that flag is for. */
+@media (prefers-reduced-motion: reduce) {
+  .vk-btn.vk-standby,
+  .vk-btn.vk-standby .vk-led {
+    animation: none;
+  }
+  .vk-btn.vk-standby {
+    border-color: var(--vk-amber-dim);
+    color: var(--vk-amber);
+  }
+}
+
+/*
+ * Colour-coded headers. Rack modules and left-rail sections both set --vk-tone, and the
+ * header derives everything from that one variable: a dark wash of the tone behind a
+ * bright tint of the same hue. Readability was the constraint - text mixes 78% toward
+ * white over a 14-26% wash, so it clears AA on every tone in use, and the module body
+ * stays neutral grey so colour codes the section without tinting the controls.
+ */
+.vk-tone-head {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--vk-tone) 26%, var(--vk-panel-hi)),
+    color-mix(in srgb, var(--vk-tone) 14%, var(--vk-panel-hi))
+  );
+  border-bottom: 1px solid color-mix(in srgb, var(--vk-tone) 45%, var(--vk-line));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--vk-tone) 20%, transparent);
+}
+
+.vk-tone-text {
+  color: color-mix(in srgb, var(--vk-tone) 78%, #ffffff);
+}
+
+.vk-tone-dim {
+  color: color-mix(in srgb, var(--vk-tone) 50%, var(--vk-text-dim));
+}
+
+/* ================================================================== marketing site
+ * Only used by /site. The instrument UI never loads these rules' animations.
+ * See design.md → "Marketing Site (/site)".
+ */
+
+.bk-site {
+  --bk-black: #000;
+  --bk-ink: #0b0d0e;
+  --bk-slate: #1e252b;
+  --bk-steel: #3c4043;
+  --bk-ash: #79837a;
+  --bk-mist: #9aa39b;
+  --bk-paper: #f4f4f2;
+  --bk-accent: #35d6d0;
+
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--bk-black);
+  color: var(--bk-mist);
+  font-family: var(--font-mono);
+  scroll-behavior: smooth;
+}
+
+/* The site is readable content, unlike the instrument UI where selection is a nuisance. */
+.bk-site,
+.bk-site * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.bk-h {
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: -0.02em;
+  line-height: 0.92;
+  color: var(--bk-paper);
+}
+
+.bk-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--bk-ash);
+}
+
+.bk-body {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--bk-mist);
+}
+
+.bk-link {
+  color: var(--bk-ash);
+  text-decoration: none;
+  transition: color 0.18s ease;
+}
+.bk-link:hover {
+  color: var(--bk-paper);
+}
+
+.bk-rule {
+  height: 1px;
+  background: var(--bk-steel);
+  opacity: 0.55;
+}
+
+/* Faint technical HUD overlay — hairline grid, barely there. */
+.bk-hud {
+  background-image: linear-gradient(to right, rgb(255 255 255 / 3%) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(255 255 255 / 3%) 1px, transparent 1px);
+  background-size: 96px 96px;
+}
+
+/* ---------------------------------------------------------------- logo motion */
+
+@keyframes bk-pulse {
+  0%,
+  100% {
+    opacity: 0.9;
+    filter: drop-shadow(0 0 10px rgb(53 214 208 / 18%));
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 26px rgb(53 214 208 / 42%));
+  }
+}
+
+.bk-logo-pulse {
+  animation: bk-pulse 4s ease-in-out infinite;
+}
+
+/* Erratic electrical shock. Stutter frames, hot blowout, x-jitter, then decay back.
+   Duration is randomised per burst from JS via --bk-shock-ms. */
+@keyframes bk-shock {
+  0% {
+    filter: none;
+    transform: translateX(0);
+  }
+  8% {
+    filter: brightness(2.6) saturate(0) contrast(1.6) drop-shadow(0 0 30px rgb(255 255 255 / 90%));
+    transform: translateX(-2px);
+  }
+  18% {
+    filter: none;
+    transform: translateX(1px);
+  }
+  32% {
+    filter: brightness(1.8) saturate(6) hue-rotate(-25deg)
+      drop-shadow(0 0 34px rgb(53 214 208 / 95%));
+    transform: translateX(2px);
+  }
+  44% {
+    filter: none;
+    transform: translateX(0);
+  }
+  62% {
+    filter: brightness(2.2) saturate(4) hue-rotate(150deg)
+      drop-shadow(0 0 28px rgb(120 190 255 / 85%));
+    transform: translateX(-1px);
+  }
+  76% {
+    filter: brightness(1.15) drop-shadow(0 0 18px rgb(53 214 208 / 50%));
+    transform: translateX(0);
+  }
+  100% {
+    filter: none;
+    transform: translateX(0);
+  }
+}
+
+.bk-logo-shock {
+  animation:
+    bk-shock var(--bk-shock-ms, 170ms) steps(1, end) 1,
+    bk-pulse 4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bk-logo-pulse,
+  .bk-logo-shock {
+    animation: none;
+  }
+  .bk-site {
+    scroll-behavior: auto;
+  }
+}
+
+/* ==================================================================
+   METAL SKIN — two-tone rack dress (dark chassis + silver faceplate)
+   ------------------------------------------------------------------
+   Ported from the product renders. Scoped to `.mk` so it can be rolled
+   out module by module instead of in one irreversible sweep.
+
+   Everything here is gradients and box-shadows: no bitmaps and no CSS
+   filters. There can be 50+ knobs and several faceplates on screen at
+   once, and blur/drop-shadow filters force an offscreen compositing
+   pass per element — that is the difference between 60fps and 30fps
+   while a knob is being dragged.
+   ================================================================== */
+
+.mk {
+  --mk-chassis: #07080a;
+  /* Dark brushed aluminium, straight off the product render. This replaces the
+     light-silver faceplate shipped in the first pass — see design.md. */
+  --mk-face: #1d2124;
+  --mk-face-hi: #2b3033;
+  --mk-face-lo: #121517;
+  /* Engraving on dark metal is a LIGHT cut with a dark shadow beneath — the exact
+     inverse of engraving on silver. */
+  --mk-etch: #ccd2d5;
+  --mk-etch-dim: #7d868b;
+  --mk-bezel: #34393c;
+  --mk-teal: #35d6d0;
+  --mk-glass: #050708;
+}
+
+/* The same symmetric gradient applied to every FLAT rack module in the chain, so the
+   whole signal path shares the render's look without pulling the metal control skin
+   (dials, engraving, glass) onto all 22 modules. Background only - the panel border,
+   category-coloured header and layout are untouched. */
+.vk-grad-face {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 4%) 0%, rgb(255 255 255 / 0%) 20%, rgb(0 0 0 / 16%) 100%),
+    linear-gradient(
+      90deg,
+      #131314 0%,
+      #1b1c1d 14%,
+      #242628 34%,
+      #2a2c2e 50%,
+      #242628 66%,
+      #1b1c1d 86%,
+      #131314 100%
+    ) !important;
+}
+
+/* Module faceplate - GRADIENT skin (replaces the brushed-metal pass).
+   Measured off the ChainModuleGradientRender reference: the plate is neutral grey
+   and symmetric on the horizontal axis - dark at both outer edges (~#141414),
+   lifting to a broad soft crest through the centre (~#2c2c2c), with almost no
+   vertical variation. Two layers only:
+     1. a faint top-down sheen so the plate reads as lit from above
+     2. the symmetric edges -> centre gradient (the look picked from the render)
+   No texture layer at all. The brushed grain is gone on purpose: at this panel
+   size any hairline pattern either aliases into dots or reads as noise, and the
+   render gets all of its depth from the gradient falloff instead. */
+.mk-face {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 5%) 0%, rgb(255 255 255 / 0%) 22%, rgb(0 0 0 / 14%) 100%),
+    linear-gradient(
+      90deg,
+      #131314 0%,
+      #1c1d1e 14%,
+      #26282a 34%,
+      #2c2e30 50%,
+      #26282a 66%,
+      #1c1d1e 86%,
+      #131314 100%
+    );
+  border: 1px solid #0a0b0c;
+  /* Softer corners than the bolted plate had: the render is a moulded unit, not a
+     rack ear, so there is nothing for a tight 4px radius to imply. */
+  border-radius: 10px;
+  /* One bright top lip, black bottom lip. Side bevels are deliberately omitted -
+     the side gradient already falls to near-black at both edges, and adding them
+     gave the plate a drawn outline. */
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 14%),
+    inset 0 -1px 0 rgb(0 0 0 / 70%),
+    0 2px 8px rgb(0 0 0 / 75%);
+}
+
+/* Dark anodised chassis the faceplates are bolted into. */
+.mk-chassis {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgb(255 255 255 / 2%) 0px,
+      rgb(255 255 255 / 2%) 1px,
+      rgb(0 0 0 / 3%) 1px,
+      rgb(0 0 0 / 3%) 2px
+    ),
+    linear-gradient(180deg, #17191b 0%, var(--mk-chassis) 100%);
+}
+
+/* Hex screw. Sunk into the plate: dark socket ring, bright rim on the
+   lower-right where the light does not reach directly. */
+.mk-screw {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  background:
+    linear-gradient(140deg, #55595c 0%, #82888c 40%, #3c4043 100%);
+  box-shadow:
+    inset 0 1px 1px rgb(255 255 255 / 40%),
+    inset 0 -1px 1px rgb(0 0 0 / 70%),
+    0 0 0 1px rgb(0 0 0 / 70%),
+    0 1px 1px rgb(255 255 255 / 7%);
+  position: relative;
+}
+/* The slot. A single hairline, angled — screws in a real rack are never aligned. */
+.mk-screw::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: linear-gradient(
+    108deg,
+    transparent 44%,
+    rgb(0 0 0 / 62%) 44%,
+    rgb(0 0 0 / 62%) 56%,
+    transparent 56%
+  );
+}
+.mk-screw:nth-child(even)::after {
+  background: linear-gradient(
+    24deg,
+    transparent 44%,
+    rgb(0 0 0 / 62%) 44%,
+    rgb(0 0 0 / 62%) 56%,
+    transparent 56%
+  );
+}
+
+/* Sunken black-glass readout window, as on the render's meter panes. */
+.mk-glass {
+  background: linear-gradient(180deg, #0d1113 0%, var(--mk-glass) 100%);
+  border: 1px solid #4e5356;
+  border-radius: 2px;
+  box-shadow:
+    inset 0 2px 5px rgb(0 0 0 / 90%),
+    inset 0 -1px 0 rgb(255 255 255 / 8%),
+    0 1px 0 rgb(255 255 255 / 30%);
+}
+
+/* Engraved lettering: dark ink with a 1px light shadow underneath, which is
+   what makes type look cut INTO metal rather than printed on top of it. */
+.mk-etch {
+  color: var(--mk-etch);
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 0 rgb(255 255 255 / 55%);
+}
+.mk-etch-dim {
+  color: var(--mk-etch-dim);
+}
+.mk-etch-lg {
+  font-size: 12px;
+  letter-spacing: 0.22em;
+}
+
+/* Teal indicator LED, bezelled into the plate. */
+.mk-led {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: #2c3234;
+  box-shadow:
+    inset 0 1px 1px rgb(0 0 0 / 80%),
+    0 0 0 1px rgb(0 0 0 / 30%),
+    0 1px 0 rgb(255 255 255 / 35%);
+}
+.mk-led[data-on="true"] {
+  background: var(--mk-teal);
+  box-shadow:
+    inset 0 0 2px rgb(255 255 255 / 90%),
+    0 0 6px var(--mk-teal),
+    0 0 0 1px rgb(0 0 0 / 30%);
+}
+
+/* Plate-mounted momentary/latching button, e.g. the render's boxed "IN". */
+.mk-btn {
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--mk-etch);
+  padding: 3px 7px;
+  border-radius: 2px;
+  cursor: pointer;
+  background: linear-gradient(180deg, #3a4043 0%, #23282b 100%);
+  border: 1px solid #0c0e0f;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 18%),
+    inset 0 -1px 0 rgb(0 0 0 / 60%),
+    0 1px 0 rgb(255 255 255 / 6%);
+  text-shadow: 0 -1px 0 rgb(0 0 0 / 70%);
+}
+.mk-btn:active {
+  background: linear-gradient(180deg, #1a1e20 0%, #2b3134 100%);
+  box-shadow: inset 0 1px 3px rgb(0 0 0 / 80%);
+}
+/* Engaged: the render's boxed teal "IN" — lit glass, not a lit metal cap. */
+.mk-btn[data-active="true"] {
+  color: var(--mk-teal);
+  background: linear-gradient(180deg, #0c2b2b 0%, #07191a 100%);
+  border-color: #10484a;
+  text-shadow: 0 0 6px var(--mk-teal);
+  box-shadow:
+    inset 0 1px 3px rgb(0 0 0 / 80%),
+    inset 0 0 8px rgb(53 214 208 / 22%),
+    0 1px 0 rgb(255 255 255 / 8%);
+}
+
+/* Type inside a metal module, re-inked as engraving rather than duplicating every
+   control component for the new skin. The plate is now dark, so this is a light
+   cut with a black shadow above the stroke — the opposite of the silver pass, and
+   it also fixes the low-contrast 10px value text that pass suffered from. */
+.mk .vk-label,
+.mk .vk-value {
+  color: var(--mk-etch);
+  text-shadow: 0 -1px 0 rgb(0 0 0 / 80%);
+}
+.mk .vk-label {
+  color: var(--mk-etch-dim);
+}
+/* Hairline rules read as a milled groove: dark line, light lip below it. */
+.mk .vk-rule-face {
+  border-color: rgb(0 0 0 / 70%);
+  box-shadow: 0 1px 0 rgb(255 255 255 / 7%);
+}
+
+/* ==================================================================
+   RECORDER — red transport dress
+   ------------------------------------------------------------------
+   The recorder is the one destructive control in the app, so it gets
+   the only red field in the UI. Diagonal dark/light red stripes on the
+   header carry the theme down from the panel title into the transport.
+
+   Same rule as the metal skin: gradients and box-shadows only. The
+   record button's glow is a box-shadow, not a filter — a drop-shadow
+   filter here would repaint on every pulse frame.
+   ================================================================== */
+
+.rec-header {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      #7d1218 0px,
+      #7d1218 9px,
+      #4a0a0e 9px,
+      #4a0a0e 18px
+    );
+  border-bottom: 1px solid #2a0508;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 14%),
+    inset 0 -2px 6px rgb(0 0 0 / 45%);
+}
+.rec-header .vk-title,
+.rec-header .vk-label {
+  color: #ffd9db;
+  text-shadow: 0 -1px 0 rgb(0 0 0 / 75%);
+}
+
+/* Big round record button. Idle it is a dark red dome; armed it lamps up
+   and breathes so you can see capture is live from across the room. */
+.rec-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  flex: none;
+  cursor: pointer;
+  border: 1px solid #2a0508;
+  background: radial-gradient(circle at 38% 32%, #8e181f 0%, #5d0e14 55%, #350609 100%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 22%),
+    inset 0 -2px 4px rgb(0 0 0 / 60%),
+    0 1px 2px rgb(0 0 0 / 70%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: box-shadow 120ms ease, background 120ms ease;
+}
+.rec-btn:hover:not(:disabled) {
+  background: radial-gradient(circle at 38% 32%, #a91d26 0%, #6d1118 55%, #3d070b 100%);
+}
+.rec-btn:active:not(:disabled) {
+  box-shadow:
+    inset 0 2px 5px rgb(0 0 0 / 75%),
+    0 1px 0 rgb(255 255 255 / 8%);
+}
+.rec-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/* The lens: a lit dot inside the dome. */
+.rec-btn::after {
+  content: "";
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #ff8a8a 0%, #ff3b30 45%, #b3151b 100%);
+  box-shadow: inset 0 -1px 2px rgb(0 0 0 / 45%);
+}
+
+.rec-btn[data-armed="true"] {
+  border-color: #ff6b6b;
+  background: radial-gradient(circle at 38% 32%, #ff4a42 0%, #c2181f 55%, #780d12 100%);
+  animation: rec-pulse 1.5s ease-in-out infinite;
+}
+.rec-btn[data-armed="true"]::after {
+  /* Armed, the lens becomes a stop square. */
+  border-radius: 2px;
+  width: 11px;
+  height: 11px;
+  background: #ffe9e9;
+  box-shadow: 0 0 6px rgb(255 255 255 / 70%);
+}
+
+/* Paused: lit but not breathing — capture is armed and not moving. */
+.rec-btn[data-armed="true"][data-paused="true"] {
+  animation: none;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 22%),
+    0 0 8px rgb(255 59 48 / 45%);
+}
+
+@keyframes rec-pulse {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 25%),
+      0 0 6px rgb(255 59 48 / 55%),
+      0 0 14px rgb(255 59 48 / 25%);
+  }
+  50% {
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 25%),
+      0 0 12px rgb(255 59 48 / 95%),
+      0 0 26px rgb(255 59 48 / 55%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rec-btn[data-armed="true"] {
+    animation: none;
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 25%),
+      0 0 12px rgb(255 59 48 / 80%);
+  }
+}

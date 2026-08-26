@@ -1,0 +1,72 @@
+// @see - https://www.electron.build/configuration/configuration
+//
+// Bro.Kodr packaging. The Windows target is the primary one: `bun run dist` from
+// packages/desktop produces release/<version>/Bro.Kodr-Windows-<version>-Setup.exe.
+//
+// electron-builder cannot cross-compile a signed Windows installer from Linux, so the
+// .exe must be produced on a Windows machine (or a Windows CI runner). See README.md.
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.brokodr.app",
+  "productName": "Bro.Kodr",
+  "copyright": "Copyright © Kane Bateman (Australia)",
+  "asar": true,
+  "directories": {
+    "output": "release/${version}",
+    "buildResources": "build"
+  },
+  "files": [
+    "dist",
+    "dist-electron",
+    "web-dist"
+  ],
+  // PLACEHOLDER — packaged-build deep links (and desktop managed sign-in) DO NOT WORK until this
+  // scheme is replaced with the app's real `runable-<applicationId>` (the value main.ts derives at
+  // runtime from APPLICATION_ID). Dev builds register the protocol at runtime and ignore this.
+  "protocols": [
+    {
+      "name": "App deep links",
+      "schemes": ["runable-app"]
+    }
+  ],
+  "fileAssociations": [
+    {
+      "ext": "vkpreset",
+      "name": "Bro.Kodr preset",
+      "description": "Bro.Kodr signal chain preset",
+      "role": "Editor"
+    }
+  ],
+  "mac": {
+    "target": ["dmg"],
+    "category": "public.app-category.music",
+    "artifactName": "${productName}-Mac-${version}-Installer.${ext}",
+    // Microphone access is the entire point of the app; macOS refuses without this string.
+    "extendInfo": {
+      "NSMicrophoneUsageDescription": "Bro.Kodr processes your microphone input in real time."
+    }
+  },
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "artifactName": "${productName}-Windows-${version}-Setup.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "deleteAppDataOnUninstall": false,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Bro.Kodr"
+  },
+  "linux": {
+    "target": ["AppImage"],
+    "category": "AudioVideo",
+    "artifactName": "${productName}-Linux-${version}.${ext}"
+  }
+}

@@ -37,7 +37,60 @@ const OP = {
   PANIC: 8,
   REC_STATE: 9,
   FILE: 10,
+  PAD: 11,      // BROBEATS pad: trigger, release, per-pad param
+  DRUM: 12,     // BROBEATS rack: gain, mute, solo, route
+  PADFX: 13,    // a param on an effect inside a pad's own chain
+  LOOP: 14,     // loop track: transport verbs + per-track params
+  LOOPER: 15,   // looper bus: gain, mute
+  CLOCK: 16,    // transport: bpm, bar length, quantise grid, run, reset
+  LOOPFX: 17,   // a param on an effect inside a loop track's own chain
+  VOICE: 18,    // Smart Voice: one parameter, by wire key
+  VOICECAL: 19, // Smart Voice calibration: centroids, class->pad, capture control
 };
+
+// Smart Voice parameter names, indexed by wire key. Mirrors VOICE_KEY in
+// core/beat-classify.js — scripts/verify-engine-voice.mjs fails if the two drift.
+// APPEND ONLY, same reason as every other key table here.
+const VOICE_KEY = [
+  "enabled", "sensitivity", "floorDb", "minGapMs", "featureMs",
+  "mode", "margin", "velMin", "velDb", "monitor",
+];
+
+// Calibration sub-fields for OP.VOICECAL. `id` carries the class index where one
+// applies, `aux1` the feature/band index, `value` the number.
+const VOICE_CAL = {
+  CENTROID: 0,
+  ATTACK: 1,
+  PAD: 2,
+  CAPTURE: 3,
+  CLEAR: 4,
+  RESET: 5,
+  DETRESET: 6,
+};
+
+// Loop sub-fields for OP.LOOP. `id` carries the track index. Transport verbs are
+// separate fields rather than a key table because they take no value — a record punch
+// is the single most latency-sensitive thing in the app after a pad hit.
+const LOOP_FIELD = { REC: 0, PLAY: 1, STOP: 2, CLEAR: 3, UNDO: 4, PARAM: 5, CLEARALL: 6 };
+// Per-track parameter names, indexed by wire key. Mirrors LOOP_KEY in core/looper.js.
+// APPEND ONLY — never reorder or delete, the index is what presets and the ring store.
+const LOOP_KEY = ["gain", "mute", "solo", "pan", "sync", "source"];
+// Looper-bus parameter names for OP.LOOPER. APPEND ONLY, same reason.
+const LOOPER_KEY = ["gain", "mute"];
+// Transport parameter names for OP.CLOCK. APPEND ONLY, same reason.
+const CLOCK_KEY = ["bpm", "beatsPerBar", "quantize", "run", "reset"];
+
+// Pad sub-fields for OP.PAD. `id` carries the pad index.
+const PAD_FIELD = { TRIGGER: 0, RELEASE: 1, PARAM: 2 };
+// Pad parameter names, indexed by wire key. APPEND ONLY — never reorder or delete, the
+// index is what presets and the command ring store.
+const PAD_KEY = [
+  "attack", "decay", "sustain", "release", "hold",
+  "pitch", "start", "reverse", "gain", "pan",
+  "mode", "velAmount", "choke", "mute",
+];
+// Rack sub-fields for OP.DRUM. APPEND ONLY, same reason.
+const DRUM_KEY = ["gain", "mute", "solo", "route"];
 
 // File-transport sub-fields for OP.FILE.
 const FILE_FIELD = {
@@ -78,7 +131,14 @@ class VowkodrProcessor extends AudioWorkletProcessor {
 
     this.meterSeq = o.meterSeq ? new Int32Array(o.meterSeq) : null;
     this.meterData = o.meterData ? new Float32Array(o.meterData) : null;
-    this.meterScratch = new Float32Array(48);
+    // Must match METER_FIELDS in src/web/audio/worklet-backend.ts, which sizes the
+    // shared block this is copied into. 192 covers engine + slots + file + BROBEATS +
+    // looper (68..107) + Smart Voice (108..126), with room for the next block to be
+    // appended. It was 128, which Smart Voice filled to within one field.
+    this.meterScratch = new Float32Array(192);
+    // One calibration capture row, reused by the "getvoicecaps" pull so the handler
+    // allocates only the reply it has to post.
+    this.voiceCapRow = new Float32Array(this.engine.voiceCaptureStride);
     // Preallocated silence, used as the mic substitute when there is no live input but
     // the file player is the source. Never allocate on the audio thread.
     this.silentL = new Float32Array(512);
@@ -156,6 +216,49 @@ class VowkodrProcessor extends AudioWorkletProcessor {
       this.port.postMessage({ t: "fileready", frames: m.frames, rate: m.rate });
       return;
     }
+    if (m.t === "padload") {
+      // Decoded on the UI thread and handed over as a SharedArrayBuffer view, exactly
+      // like a backing track: dropping a 10MB one-shot on a pad copies nothing here.
+      const data = new Float32Array(m.data);
+      this.engine.applyCommand({
+        t: "padload",
+        index: m.index,
+        layer: m.layer || 0,
+        data,
+        frames: m.frames,
+        rate: m.rate,
+      });
+      // Echo the pad's layer count back, not just "done": a sample that arrives but does
+      // not install (bad length, bad index) is otherwise a silent pad with no explanation.
+      const pad = this.engine.drums.pad(m.index);
+      this.port.postMessage({
+        t: "padready",
+        index: m.index,
+        layer: m.layer || 0,
+        frames: m.frames,
+        layers: pad ? pad.layerCount : 0,
+      });
+      return;
+    }
+    if (m.t === "padclear") {
+      // Wipes the pad's sample layers and its effect chain in one go (the rack does
+      // both), then tells the UI the chain is empty now.
+      this.engine.applyCommand({ t: "padclear", index: m.index });
+      this.#reportPadChain(m.index);
+      return;
+    }
+    if (m.t === "padfx") {
+      // Structural pad-chain edits need strings, so they come by message, not the ring.
+      this.engine.applyCommand(m);
+      this.#reportPadChain(m.index);
+      return;
+    }
+    if (m.t === "loopfx") {
+      // Structural loop-chain edits need strings, so they come by message, not the ring.
+      this.engine.applyCommand(m);
+      this.#reportLoopChain(m.index);
+      return;
+    }
     if (m.t === "fileclear") {
       this.engine.applyCommand({ t: "fileclear" });
       return;
@@ -167,16 +270,94 @@ class VowkodrProcessor extends AudioWorkletProcessor {
       this.port.postMessage({ t: "visual", id: m.id, data: v ? Array.from(v) : null });
       return;
     }
+    if (m.t === "getlooppeaks") {
+      // The loop deck's waveform. Pulled on demand — after a take, an overdub, or an
+      // undo — never per frame: the buffer is seconds long and the shape only changes
+      // when the audio does. min/max per bucket, interleaved, so a bipolar waveform
+      // reads as its real shape rather than a rectified blob.
+      this.port.postMessage({ t: "looppeaks", index: m.index | 0, data: this.#loopPeaks(m.index | 0, m.buckets | 0) });
+      return;
+    }
+    if (m.t === "getvoicecaps") {
+      // Calibration captures, pulled by the calibration panel while it is open. A pull
+      // rather than a meter field because a row is CAP_STRIDE numbers and there are up
+      // to 64 of them: that has no business in a block the UI reads every frame.
+      // Returns rows from `from` onward, flat, with how many and where they started —
+      // the ring may have moved on, and the panel has to know which hits it missed.
+      const stride = this.engine.voiceCaptureStride;
+      const row = this.voiceCapRow;
+      const want = Math.max(0, Math.min(64, (m.max | 0) || 64));
+      const total = this.engine.voice.captureCount;
+      let first = Math.max(0, m.from | 0);
+      if (first < total - 64) first = total - 64;
+      const rows = [];
+      for (let n = first; n < total && rows.length / stride < want; n++) {
+        if (!this.engine.readVoiceCapture(n, row)) continue;
+        for (let i = 0; i < stride; i++) rows.push(row[i]);
+      }
+      this.port.postMessage({ t: "voicecaps", from: first, total, stride, rows });
+      return;
+    }
     if (m.t === "pcmds") {
       // Fallback transport for when SharedArrayBuffer is unavailable (no COOP/COEP).
       // Same opcodes, delivered as a batched flat array instead of the ring buffer.
       const a = m.a;
-      for (let i = 0; i + 3 < a.length; i += 4) this.#applyOp(a[i], a[i + 1], a[i + 2], a[i + 3]);
+      for (let i = 0; i + 5 < a.length; i += 6) {
+        this.#applyOp(a[i], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5]);
+      }
       return;
     }
     if (m.t === "ping") {
       this.port.postMessage({ t: "pong", time: currentTime });
     }
+  }
+
+  /**
+   * min/max peaks for one loop track's recorded audio, interleaved [lo,hi] per bucket.
+   * Returns null when the track has nothing recorded. Allocates — deliberately, this
+   * runs off the render path in response to a UI pull, not per block.
+   */
+  #loopPeaks(index, buckets) {
+    const track = this.engine.looper.track(index);
+    if (!track || !track.bufL || track.frames <= 0) return null;
+    const n = Math.max(1, Math.min(4096, buckets || 480));
+    const frames = track.frames;
+    const out = new Array(n * 2);
+    const l = track.bufL;
+    const r = track.bufR || track.bufL;
+    for (let b = 0; b < n; b++) {
+      const start = Math.floor((b * frames) / n);
+      const end = Math.max(start + 1, Math.floor(((b + 1) * frames) / n));
+      let lo = 0;
+      let hi = 0;
+      for (let i = start; i < end; i++) {
+        const v = (l[i] + r[i]) * 0.5;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      out[b * 2] = lo;
+      out[b * 2 + 1] = hi;
+    }
+    return out;
+  }
+
+  #reportPadChain(index) {
+    const chain = this.engine.drums.padChains[index | 0];
+    this.port.postMessage({
+      t: "padchain",
+      index: index | 0,
+      order: chain ? chain.slots.map((s) => ({ id: s.id, type: s.type, bypassed: s.bypassed })) : [],
+    });
+  }
+
+  #reportLoopChain(index) {
+    const track = this.engine.looper.track(index | 0);
+    const chain = track ? track.chain : null;
+    this.port.postMessage({
+      t: "loopchain",
+      index: index | 0,
+      order: chain ? chain.slots.map((s) => ({ id: s.id, type: s.type, bypassed: s.bypassed })) : [],
+    });
   }
 
   #reportChain() {
@@ -196,14 +377,21 @@ class VowkodrProcessor extends AudioWorkletProcessor {
 
     while (r !== w) {
       const base = (r % CMD_SLOTS) * CMD_STRIDE;
-      this.#applyOp(this.cmdData[base], this.cmdData[base + 1], this.cmdData[base + 2], this.cmdData[base + 3]);
+      this.#applyOp(
+        this.cmdData[base],
+        this.cmdData[base + 1],
+        this.cmdData[base + 2],
+        this.cmdData[base + 3],
+        this.cmdData[base + 4],
+        this.cmdData[base + 5],
+      );
       r++;
     }
     Atomics.store(this.cmdHeader, 1, r);
   }
 
   /** Decode one numeric command. Shared by the ring buffer and the postMessage fallback. */
-  #applyOp(op, id, key, value) {
+  #applyOp(op, id, key, value, aux1, aux2) {
     const e = this.engine;
     switch (op) {
       case OP.PARAM: {
@@ -245,6 +433,101 @@ class VowkodrProcessor extends AudioWorkletProcessor {
       case OP.PANIC:
         e.applyCommand({ t: "panic" });
         break;
+      case OP.PAD: {
+        // id = pad index. Trigger is the hot path once Smart Voice is driving it, so it
+        // costs one switch and one call — no object, no allocation.
+        const f = key | 0;
+        if (f === PAD_FIELD.TRIGGER) e.drums.trigger(id | 0, value);
+        else if (f === PAD_FIELD.RELEASE) e.drums.release(id | 0);
+        else {
+          const name = PAD_KEY[aux1 | 0];
+          if (name !== undefined) e.drums.setPadParam(id | 0, name, value);
+        }
+        break;
+      }
+      case OP.DRUM: {
+        const name = DRUM_KEY[key | 0];
+        if (name !== undefined) e.applyCommand({ t: "drum", key: name, value });
+        break;
+      }
+      case OP.PADFX: {
+        // aux1 = pad index, id = slot id inside that pad's chain, key = param index.
+        const chain = e.drums.padChains[aux1 | 0];
+        if (!chain) break;
+        const slot = chain.find ? chain.find(id) : null;
+        if (slot && slot.paramNames) {
+          const name = slot.paramNames[key | 0];
+          if (name !== undefined) slot.effect.setParam(name, value);
+        }
+        break;
+      }
+      case OP.LOOP: {
+        // id = track index. A punch is a bare opcode with no payload, so the path from
+        // the UI's pointerdown to the looper's arm is one ring slot and one call.
+        const f = key | 0;
+        if (f === LOOP_FIELD.REC) e.applyCommand({ t: "loop", op: "rec", index: id });
+        else if (f === LOOP_FIELD.PLAY) e.applyCommand({ t: "loop", op: "play", index: id });
+        else if (f === LOOP_FIELD.STOP) e.applyCommand({ t: "loop", op: "stop", index: id });
+        else if (f === LOOP_FIELD.CLEAR) e.applyCommand({ t: "loop", op: "clear", index: id });
+        else if (f === LOOP_FIELD.UNDO) e.applyCommand({ t: "loop", op: "undo", index: id });
+        else if (f === LOOP_FIELD.CLEARALL) e.applyCommand({ t: "loop", op: "clearall", index: 0 });
+        else {
+          const name = LOOP_KEY[aux1 | 0];
+          if (name !== undefined) e.applyCommand({ t: "loopparam", index: id, key: name, value });
+        }
+        break;
+      }
+      case OP.LOOPER: {
+        const name = LOOPER_KEY[key | 0];
+        if (name !== undefined) e.applyCommand({ t: "looperparam", key: name, value });
+        break;
+      }
+      case OP.CLOCK: {
+        const name = CLOCK_KEY[key | 0];
+        if (name !== undefined) e.applyCommand({ t: "clock", key: name, value });
+        break;
+      }
+      case OP.LOOPFX: {
+        // aux1 = track index, id = slot id inside that track's chain, key = param index.
+        const track = e.looper.track(aux1 | 0);
+        const chain = track ? track.chain : null;
+        if (!chain) break;
+        const slot = chain.find ? chain.find(id) : null;
+        if (slot && slot.paramNames) {
+          const name = slot.paramNames[key | 0];
+          if (name !== undefined) slot.effect.setParam(name, value);
+        }
+        break;
+      }
+      case OP.VOICE: {
+        const name = VOICE_KEY[key | 0];
+        if (name !== undefined) e.applyCommand({ t: "voice", key: name, value });
+        break;
+      }
+      case OP.VOICECAL: {
+        const f = key | 0;
+        const cls = id | 0;
+        if (f === VOICE_CAL.CENTROID) {
+          e.applyCommand({ t: "voicecal", op: "centroid", cls, feature: aux1 | 0, value });
+        } else if (f === VOICE_CAL.ATTACK) {
+          e.applyCommand({ t: "voicecal", op: "attack", cls, band: aux1 | 0, value });
+        } else if (f === VOICE_CAL.PAD) {
+          // A negative value is how the UI mutes a class, so it travels as-is rather
+          // than being clamped to a pad index here.
+          e.applyCommand({ t: "voicecal", op: "pad", cls, pad: value | 0 });
+        } else if (f === VOICE_CAL.CAPTURE) {
+          // value < 0 stops capturing; the class to capture rides in `value` so one
+          // field covers both, matching setCapture's own -1 convention.
+          e.applyCommand({ t: "voicecal", op: "capture", cls: value | 0 });
+        } else if (f === VOICE_CAL.CLEAR) {
+          e.applyCommand({ t: "voicecal", op: "clear" });
+        } else if (f === VOICE_CAL.RESET) {
+          e.applyCommand({ t: "voicecal", op: "reset" });
+        } else if (f === VOICE_CAL.DETRESET) {
+          e.applyCommand({ t: "voicecal", op: "detreset" });
+        }
+        break;
+      }
       case OP.FILE: {
         const f = key | 0;
         if (f === FILE_FIELD.ROUTE) e.applyCommand({ t: "fileroute", value });
@@ -378,20 +661,17 @@ class VowkodrProcessor extends AudioWorkletProcessor {
       inL = input[0];
       inR = input.length > 1 && input[1] ? input[1] : input[0];
     } else {
-      // No mic (device gone, permission revoked, or the user is running file-only).
-      // The engine still has to run: a loaded file is a valid source on its own, and
-      // bailing here would silence file playback whenever the input is absent.
+      // No mic (device gone, permission revoked, or the user is running file-only or
+      // drums-only). The engine still has to run: a loaded file, a BROBEATS pad and the
+      // tail of a reverb are all valid sources with no input at all, so feed it silence
+      // rather than short-circuiting to zeros — that is what used to make the drum rack
+      // mute on a machine with no input device.
       this.#drainCommands();
-      if (this.engine.player.loaded && this.engine.fileRoute !== 0) {
-        const sl = this.silentL;
-        const sr = this.silentR;
-        this.engine.process(sl.subarray(0, frames), sr.subarray(0, frames), outL, outR, frames);
-        this.#publishScope(sl, sr, outL, outR, frames);
-        this.#publishRecording(this.engine.dryL, this.engine.dryR, outL, outR, frames);
-      } else {
-        outL.fill(0);
-        if (outR !== outL) outR.fill(0);
-      }
+      const sl = this.silentL;
+      const sr = this.silentR;
+      this.engine.process(sl.subarray(0, frames), sr.subarray(0, frames), outL, outR, frames);
+      this.#publishScope(sl, sr, outL, outR, frames);
+      this.#publishRecording(this.engine.dryL, this.engine.dryR, outL, outR, frames);
       this.#publishMeters();
       return true;
     }

@@ -1,7 +1,8 @@
 /*
  * Bro.Kodr DSP core — parameter keys. GENERATED, DO NOT EDIT.
  *
- * Source:    packages/web/src/web/audio/param-schema.ts
+ * Sources:   packages/web/src/web/audio/param-schema.ts (chain effect params)
+ *            packages/web/src/web/audio/backend.ts (pad and rack params)
  * Generator: scripts/gen-param-keys.mjs
  *
  * Regenerate with `bun scripts/gen-param-keys.mjs`. CI runs the same script
@@ -322,5 +323,39 @@ enum {
 
 /* 22 effect types, 168 params. */
 #define BK_EFFECT_TYPE_COUNT 22
+
+/*
+ * BROBEATS pad params. A pad is not a chain slot and has no effect type, so
+ * these are one flat list shared by every pad: the value is the index on the
+ * command ring (OP.PAD / PAD_FIELD.PARAM), which the worklet turns into the
+ * string key DrumVoice.setParam takes. bk_drum_voice_set_param switches on
+ * the number directly — the audio thread should not compare strings.
+ */
+enum {
+  BK_PAD_P_ATTACK = 0,
+  BK_PAD_P_DECAY = 1,
+  BK_PAD_P_SUSTAIN = 2,
+  BK_PAD_P_RELEASE = 3,
+  BK_PAD_P_HOLD = 4,
+  BK_PAD_P_PITCH = 5,
+  BK_PAD_P_START = 6,
+  BK_PAD_P_REVERSE = 7,
+  BK_PAD_P_GAIN = 8,
+  BK_PAD_P_PAN = 9,
+  BK_PAD_P_MODE = 10,
+  BK_PAD_P_VEL_AMOUNT = 11,
+  BK_PAD_P_CHOKE = 12,
+  BK_PAD_P_MUTE = 13,
+  BK_PAD_P_COUNT = 14
+};
+
+/* Rack-wide params, one per rack rather than per pad (OP.DRUM). */
+enum {
+  BK_DRUM_P_GAIN = 0,
+  BK_DRUM_P_MUTE = 1,
+  BK_DRUM_P_SOLO = 2,
+  BK_DRUM_P_ROUTE = 3,
+  BK_DRUM_P_COUNT = 4
+};
 
 #endif /* BROKODR_DSP_PARAM_KEYS_H */

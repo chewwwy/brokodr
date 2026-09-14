@@ -487,7 +487,46 @@ result meaningless. Both halves are fixed:
    **Note the tension with the libm caveat below**: a baseline drop is not automatically a
    bug, it is always something to read before re-baselining, and the reason must go in the
    commit. Baselines pinned today: `utils` 84/85/96, `delay-line` 265/267/267, `fft`
-   221/221/221 (native-vs-JS / wasm-vs-JS / native-vs-wasm).
+   221/221/221 (native-vs-JS / wasm-vs-JS / native-vs-wasm), `chain` 21/21/21.
+
+4. **The chain cannot recognise its own quality param (design defect in the port, fixed).**
+   `chain.js` recalculates the chain's latency when a `setParam` key equals the string
+   `"quality"`, oversampling quality being what moves a module's reported latency. The C
+   port takes a numeric key — the point of `Slot.paramNames`, which resolves names to
+   indices off the audio thread — and reserved index 0 for it as `BK_PARAM_QUALITY`. That
+   is wrong by construction: the key on the wire is the param's index *within its own
+   effect type's* list, so `quality` sits at a different index per type (index 5 on
+   `pitch`, absent from the other 21), and a reserved constant recalculates on whatever
+   param happens to sit at that index — for most effects, their first. Review caught it
+   before any effect module was ported against it. The chain now interprets no keys at
+   all: `bk_chain_set_param` forwards and returns, and the host calls
+   `bk_chain_recalc_latency()` after a quality change, keying off the name it already has
+   — which is what `worklet-processor.js` already does on the live path. The quirk that the
+   JS's recalc sits *outside* its `if (slot)` guard, so a quality change aimed at an absent
+   slot still recalculates, survives for free on a name-keyed host.
+
+   The drift this invites between `param-schema.ts` and 22 `set_param` switches is closed
+   by codegen, not by a checking script — a check only reports drift after someone writes
+   it. `scripts/gen-param-keys.mjs` runs under Bun so it can import the schema and read the
+   real `EFFECTS` export, and emits
+   `packages/native/include/brokodr/dsp/param-keys.h`: an enum per effect type plus a
+   `BK_P_<TYPE>_QUALITY_KEY` (or `BK_PARAM_NONE`). The header is committed so C compiles
+   without a JS toolchain; `--check` fails CI when it is stale. First consumer is the drum
+   port, which is where `--check` should be wired in.
+
+The `chain` battery is the first where the *harness's own expectations* were the main
+source of red, and worth recording as a pattern: seven checks failed against a correct
+port because the check was wrong — a multi-block payload read as one contiguous L-then-R
+run, two miscounted latency totals, an assertion that a 25 ms one-pole "reaches its
+target" (it never does), and a runaway-gain bound of 8 that a legitimate 3-deep cascade at
+1.25 exceeds. Mutation then found two real holes: a slot fed a **null** carrier bus looked
+identical to one never given a bus at all, since only the stored pointer was observed
+(fixed by counting `setCarrierBus` calls on both sides), and the recalc-on-a-miss check was
+vacuous because the latency total was already correct before the miss (fixed by making it
+deliberately stale first). Three first-draft mutants also escaped as *equivalent* mutants
+rather than as holes — two wrote to slots the length change immediately puts out of reach,
+one returned early from the hit path and so still fell through to the recalc it meant to
+remove. Reading an escape is as much work as reading a failure.
 
 #### What (c) means for the remaining port
 
@@ -496,9 +535,9 @@ result meaningless. Both halves are fixed:
     boundary, zero allocation, caller-owned structs.
   - Module order is by risk, not size: `utils` (done, 23 checks green) → `biquad` (done,
     19 checks green) → `delay-line` (done, 30 checks green, 6/6 mutants caught) → `fft`
-    (done, 52 checks green, 8/8 mutants caught) → `chain`, `drum-*`, `onset`,
-    `beat-classify` → **`looper.js` last**, being the largest (925 lines) and most
-    stateful.
+    (done, 52 checks green, 8/8 mutants caught) → `chain` (done, 91 checks green, 29/29
+    mutants caught) → `drum-*`, `onset`, `beat-classify` → **`looper.js` last**, being the
+    largest (925 lines) and most stateful.
   - Each module gets its own parity battery, and each battery is itself mutation-tested
     before it is believed. Shared plumbing lives in `packages/native/tests/parity-io.h`
     (binary stream format v3, plus the deterministic stimulus generator) and

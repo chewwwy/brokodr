@@ -18,6 +18,8 @@
  * copy when you export, the captured take is never overwritten.
  */
 
+import { applyFades, cropTo, findContentBounds, normalizeTo, toMono, buildPeaks } from "./sample-edit";
+
 export type BitDepth = 16 | 24 | 32;
 
 export interface Take {
@@ -69,82 +71,29 @@ export function formatDuration(seconds: number): string {
 
 // ------------------------------------------------------------- post-process
 
-function dbToGain(db: number): number {
-  return Math.pow(10, db / 20);
-}
-
-function peakOf(l: Float32Array, r: Float32Array): number {
-  let p = 0;
-  for (let i = 0; i < l.length; i++) {
-    const a = Math.abs(l[i]);
-    const b = Math.abs(r[i]);
-    if (a > p) p = a;
-    if (b > p) p = b;
-  }
-  return p;
-}
-
-/** Applies the export chain to a copy. Order matters: trim, then normalise, then fade. */
+/**
+ * Applies the export chain to a copy. Order matters: trim, then normalise, then fade.
+ *
+ * The arithmetic lives in `sample-edit.ts` and is shared with the BROBEATS sample editor,
+ * so the fade curve and normalise behaviour you hear when auditioning a sample are the
+ * same ones that end up in the exported file. The only thing that differs is how the trim
+ * bounds are arrived at: here from a silence threshold, there from a dragged handle.
+ */
 export function processForExport(
   src: { l: Float32Array; r: Float32Array },
   sampleRate: number,
   opts: ExportOptions,
 ): { l: Float32Array; r: Float32Array } {
-  let l = src.l;
-  let r = src.r;
+  const bounds =
+    opts.trimSilenceDb !== null
+      ? findContentBounds(src, sampleRate, opts.trimSilenceDb)
+      : { start: 0, end: src.l.length };
 
-  if (opts.trimSilenceDb !== null) {
-    const thr = dbToGain(opts.trimSilenceDb);
-    let start = 0;
-    let end = l.length;
-    while (start < end && Math.max(Math.abs(l[start]), Math.abs(r[start])) < thr) start++;
-    while (end > start && Math.max(Math.abs(l[end - 1]), Math.abs(r[end - 1])) < thr) end--;
-    // Keep 5ms of pre-roll so the first transient isn't clipped off.
-    const pad = Math.round(sampleRate * 0.005);
-    start = Math.max(0, start - pad);
-    end = Math.min(l.length, end + pad);
-    l = l.slice(start, end);
-    r = r.slice(start, end);
-  } else {
-    l = l.slice();
-    r = r.slice();
-  }
-
-  if (opts.normalizeDb !== null) {
-    const peak = peakOf(l, r);
-    if (peak > 1e-9) {
-      const g = dbToGain(opts.normalizeDb) / peak;
-      for (let i = 0; i < l.length; i++) {
-        l[i] *= g;
-        r[i] *= g;
-      }
-    }
-  }
-
-  const fi = Math.min(l.length, Math.round((opts.fadeInMs / 1000) * sampleRate));
-  for (let i = 0; i < fi; i++) {
-    // Equal-power fade — a linear ramp audibly dips in the middle.
-    const g = Math.sin((Math.PI / 2) * (i / fi));
-    l[i] *= g;
-    r[i] *= g;
-  }
-  const fo = Math.min(l.length, Math.round((opts.fadeOutMs / 1000) * sampleRate));
-  for (let i = 0; i < fo; i++) {
-    const g = Math.sin((Math.PI / 2) * (i / fo));
-    const idx = l.length - 1 - i;
-    l[idx] *= g;
-    r[idx] *= g;
-  }
-
-  if (opts.mono) {
-    for (let i = 0; i < l.length; i++) {
-      const m = (l[i] + r[i]) * 0.5;
-      l[i] = m;
-      r[i] = m;
-    }
-  }
-
-  return { l, r };
+  const out = cropTo(src, bounds.start, bounds.end);
+  if (opts.normalizeDb !== null) normalizeTo(out, opts.normalizeDb);
+  applyFades(out, sampleRate, opts.fadeInMs, opts.fadeOutMs);
+  if (opts.mono) toMono(out);
+  return out;
 }
 
 // ----------------------------------------------------------------- encoding
@@ -221,6 +170,99 @@ function writeAscii(view: DataView, offset: number, text: string) {
   for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
 }
 
+function readAscii(view: DataView, offset: number, len: number): string {
+  let s = "";
+  for (let i = 0; i < len; i++) s += String.fromCharCode(view.getUint8(offset + i));
+  return s;
+}
+
+export interface DecodedWav {
+  data: Float32Array;
+  sampleRate: number;
+  channels: number;
+}
+
+/**
+ * Reads a RIFF/WAVE file back to a mono Float32Array — the exact inverse of `encodeWav`,
+ * and the reason the sample store can keep real `.wav` files on disk rather than an
+ * opaque blob format: what it writes opens in any DAW, and what any DAW writes loads
+ * here.
+ *
+ * Deliberately not `decodeAudioData`: that needs a live AudioContext, so restoring a kit
+ * would be impossible while the engine is in standby — which is precisely when it has to
+ * happen, on the first paint after a reload. This parser only handles PCM and IEEE
+ * float, which is all WAV actually is; a compressed .wav (ADPCM, µ-law) returns null and
+ * the caller falls back to the browser decoder.
+ *
+ * Chunks are walked rather than assumed at offset 36: files written by other tools carry
+ * LIST/fact/bext chunks ahead of `data`, and a fixed offset reads them as audio.
+ */
+export function decodeWav(buffer: ArrayBuffer): DecodedWav | null {
+  if (buffer.byteLength < 44) return null;
+  const view = new DataView(buffer);
+  if (readAscii(view, 0, 4) !== "RIFF" || readAscii(view, 8, 4) !== "WAVE") return null;
+
+  let format = 0;
+  let channels = 0;
+  let sampleRate = 0;
+  let bits = 0;
+  let dataOffset = -1;
+  let dataBytes = 0;
+
+  let o = 12;
+  while (o + 8 <= buffer.byteLength) {
+    const id = readAscii(view, o, 4);
+    const size = view.getUint32(o + 4, true);
+    const body = o + 8;
+    if (id === "fmt " && size >= 16) {
+      format = view.getUint16(body, true);
+      channels = view.getUint16(body + 2, true);
+      sampleRate = view.getUint32(body + 4, true);
+      bits = view.getUint16(body + 14, true);
+      // WAVE_FORMAT_EXTENSIBLE stores the real format in the GUID's first two bytes.
+      if (format === 0xfffe && size >= 40) format = view.getUint16(body + 24, true);
+    } else if (id === "data") {
+      dataOffset = body;
+      dataBytes = Math.min(size, buffer.byteLength - body);
+    }
+    o = body + size + (size & 1);
+  }
+
+  if (dataOffset < 0 || channels < 1 || sampleRate < 1) return null;
+  if (format !== 1 && format !== 3) return null;
+
+  const bytesPerSample = bits >> 3;
+  if (bytesPerSample < 1) return null;
+  const frames = Math.floor(dataBytes / (bytesPerSample * channels));
+  const out = new Float32Array(frames);
+
+  for (let i = 0; i < frames; i++) {
+    let sum = 0;
+    for (let c = 0; c < channels; c++) {
+      const p = dataOffset + (i * channels + c) * bytesPerSample;
+      let s = 0;
+      if (format === 3) {
+        s = bits === 64 ? view.getFloat64(p, true) : view.getFloat32(p, true);
+      } else if (bits === 8) {
+        s = (view.getUint8(p) - 128) / 128;
+      } else if (bits === 16) {
+        s = view.getInt16(p, true) / 32768;
+      } else if (bits === 24) {
+        const u = view.getUint8(p) | (view.getUint8(p + 1) << 8) | (view.getUint8(p + 2) << 16);
+        s = (u & 0x800000 ? u - 0x1000000 : u) / 8388608;
+      } else if (bits === 32) {
+        s = view.getInt32(p, true) / 2147483648;
+      } else {
+        return null;
+      }
+      sum += Number.isFinite(s) ? s : 0;
+    }
+    out[i] = channels > 1 ? sum / channels : sum;
+  }
+
+  return { data: out, sampleRate, channels };
+}
+
 export function exportTake(take: Take, opts: ExportOptions): { blob: Blob; filename: string } {
   const src = opts.source === "dry" && take.dry ? take.dry : take.wet;
   const processed = processForExport(src, take.sampleRate, opts);
@@ -254,24 +296,19 @@ export function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-/** Rough peak envelope for drawing a take's waveform. */
+/**
+ * Rough peak envelope for drawing a take's waveform in the recorder strip — one absolute
+ * peak per point, drawn mirrored around the centre line.
+ *
+ * The sample editor wants the true min/max per point instead, so it calls `buildPeaks()`
+ * directly; this stays as the simpler shape the existing strip is drawn from.
+ */
 export function buildWaveform(take: Take, points: number): Float32Array {
   const out = new Float32Array(points);
-  const l = take.wet.l;
-  const r = take.wet.r;
-  if (!l.length) return out;
-  const per = l.length / points;
+  if (!take.wet.l.length) return out;
+  const mm = buildPeaks(take.wet, points);
   for (let p = 0; p < points; p++) {
-    const start = Math.floor(p * per);
-    const end = Math.min(l.length, Math.floor((p + 1) * per));
-    let peak = 0;
-    for (let i = start; i < end; i++) {
-      const a = Math.abs(l[i]);
-      const b = Math.abs(r[i]);
-      if (a > peak) peak = a;
-      if (b > peak) peak = b;
-    }
-    out[p] = peak;
+    out[p] = Math.max(Math.abs(mm[p * 2]), Math.abs(mm[p * 2 + 1]));
   }
   return out;
 }

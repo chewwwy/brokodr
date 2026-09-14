@@ -1,5 +1,6 @@
 import type { RouterClient } from "@orpc/server";
 import { createApp } from "./__core/app";
+import { kits } from "./routes/kits";
 import { ping } from "./routes/ping";
 import { presets } from "./routes/presets";
 import { tts } from "./routes/tts";
@@ -11,6 +12,7 @@ import { tts } from "./routes/tts";
 // split into more feature files as they grow.
 // Patterns and examples: skills/app/references/api.md
 export const router = {
+  kits,
   ping,
   presets,
   tts,

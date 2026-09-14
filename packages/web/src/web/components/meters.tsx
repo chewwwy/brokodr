@@ -212,7 +212,8 @@ function SpectrumStrip() {
           ctx.globalAlpha = alpha;
           ctx.lineWidth = 1;
           ctx.beginPath();
-          const n = buf.length;
+          // Live window only — `buf.length` includes an unfilled tail (see ScopeFrame).
+          const n = client.scope.frames || buf.length;
           for (let x = 0; x < w; x++) {
             const i = Math.floor((x / w) * n);
             const y = mid - Math.max(-1.5, Math.min(1.5, buf[i])) * (mid - 2);

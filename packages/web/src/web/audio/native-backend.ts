@@ -25,7 +25,9 @@
  *      open(deviceIn, deviceOut, rate, bufferFrames, mode) -> { rate, buffer, latency }
  *      close()
  *      pushCommand(opcode, id, key, value)  -> writes the same lock-free ring
- *      readMeters(Float32Array)             -> same 48-field layout
+ *      readMeters(Float32Array)             -> the same meter layout (see backend.ts;
+ *                                              it has grown past 120 fields with
+ *                                              BROBEATS, the looper and Smart Voice)
  *    backed by WASAPI exclusive mode, and ASIO via the Steinberg SDK (licence required,
  *    which is why it is a separate opt-in target).
  * 2. Port the DSP. Two supported routes:
@@ -50,7 +52,14 @@ import {
   type EngineInfo,
   type EngineMeters,
   type EngineStatus,
+  type DrumKey,
   type IoField,
+  type PadKey,
+  type LoopKey,
+  type LooperKey,
+  type ClockKey,
+  type VoiceCapture,
+  type VoiceKey,
   type ScopeFrame,
   type StartOptions,
 } from "./backend";
@@ -154,6 +163,9 @@ export class NativeBackend implements EngineBackend {
       outputLatency: r.outputLatency,
       engineLatency: 0,
       sharedMemory: true,
+      // The native host opens a duplex device: if start() resolved, capture is live.
+      inputActive: true,
+      inputError: null,
       backend: this.name,
     };
     this.state = "running";
@@ -198,6 +210,52 @@ export class NativeBackend implements EngineBackend {
   resetSlot(): void {}
   resetClip(): void {}
   panic(): void {}
+
+  // BROBEATS. Inert here for the same reason everything else is: this backend is the
+  // seam for the native WASAPI/ASIO host, and the host owns the engine once it exists.
+  triggerPad(_index: number, _velocity: number): void {}
+  releasePad(_index: number): void {}
+  setPadParam(_index: number, _key: PadKey, _value: number): void {}
+  setDrumParam(_key: DrumKey, _value: number): void {}
+  loadPadSample(_index: number, _layer: number, _data: Float32Array, _rate: number): void {}
+  clearPad(_index: number): void {}
+  resetDrums(): void {}
+  padChainCommand(_index: number, _cmd: Record<string, unknown>): void {}
+  setPadChainParam(_index: number, _slotId: number, _type: string, _key: string, _value: number): void {}
+
+  // Looper. Inert for the same reason.
+  loopRecord(_index: number): void {}
+  loopPlay(_index: number): void {}
+  loopStop(_index: number): void {}
+  loopClear(_index: number): void {}
+  loopUndo(_index: number): void {}
+  loopClearAll(): void {}
+  setLoopParam(_index: number, _key: LoopKey, _value: number): void {}
+  setLooperParam(_key: LooperKey, _value: number): void {}
+  setClockParam(_key: ClockKey, _value: number): void {}
+  loopChainCommand(_index: number, _cmd: Record<string, unknown>): void {}
+  setLoopChainParam(_index: number, _slotId: number, _type: string, _key: string, _value: number): void {}
+  async getLoopPeaks(_index: number, _buckets: number): Promise<Float32Array | null> {
+    return null;
+  }
+
+  // Smart Voice. Inert for the same reason: the classifier lives in the engine, and the
+  // native host will own the engine. The opcodes it needs are already defined (OP.VOICE,
+  // OP.VOICECAL), so wiring them is a pushCommand call each once the addon exists.
+  setVoiceParam(_key: VoiceKey, _value: number): void {}
+  setVoiceCentroid(_cls: number, _feature: number, _value: number): void {}
+  setVoiceAttackCentroid(_cls: number, _band: number, _value: number): void {}
+  setVoiceClassPad(_cls: number, _pad: number): void {}
+  setVoiceCapture(_cls: number): void {}
+  clearVoiceCaptures(): void {}
+  resetVoiceCentroids(): void {}
+  resetVoiceDetector(): void {}
+  async getVoiceCaptures(
+    _from: number,
+    _max: number,
+  ): Promise<{ from: number; total: number; rows: VoiceCapture[] }> {
+    return { from: 0, total: 0, rows: [] };
+  }
 
   readMeters(_out: EngineMeters): boolean {
     return false;

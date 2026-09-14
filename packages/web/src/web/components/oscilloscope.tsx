@@ -75,7 +75,11 @@ export function Oscilloscope({ gain = 1 }: { gain?: number }) {
 
     const out = client.scope.output;
     const inp = client.scope.input;
-    const n = out.length;
+    // The scope buffers are over-allocated; only `frames` leading samples are live. Using
+    // `out.length` here drew the permanently-zero tail as a dead flat line over the right
+    // half of the trace — the "right side doesn't move" bug.
+    const n = client.scope.frames;
+    if (n < 8) return;
     const half = Math.floor(n / 2);
 
     // ---- trigger off the output, and use the same offset for the input trace so the
@@ -83,7 +87,10 @@ export function Oscilloscope({ gain = 1 }: { gain?: number }) {
     const t = findTrigger(out, half);
     if (t >= 0) lastTrig.current = t;
     const trig = Math.min(lastTrig.current, half);
-    const span = n - trig;
+    // Fixed sweep length, variable start: a constant time base. (A variable span made the
+    // horizontal scale change every frame, so the trace stretched and wobbled to the
+    // right of the trigger point even on a steady tone.)
+    const span = half;
 
     const trace = (buf: Float32Array, color: string, alpha: number, width: number) => {
       ctx.strokeStyle = color;

@@ -39,6 +39,31 @@ import {
   type FileField,
   type IoField,
   OP,
+  PAD_COUNT,
+  PAD_FIELD,
+  type PadKey,
+  padKeyIndex,
+  type DrumKey,
+  drumKeyIndex,
+  LOOP_FIELD,
+  LOOP_METER_BASE,
+  LOOP_METER_STRIDE,
+  LOOP_TRACKS,
+  TRANSPORT_METER_BASE,
+  type LoopKey,
+  loopKeyIndex,
+  type LooperKey,
+  looperKeyIndex,
+  type ClockKey,
+  clockKeyIndex,
+  VOICE_CAL,
+  VOICE_CAPTURE_STRIDE,
+  VOICE_CLASS_COUNT,
+  VOICE_METER_BASE,
+  VOICE_METER_STRIDE,
+  type VoiceCapture,
+  type VoiceKey,
+  voiceKeyIndex,
   type ScopeFrame,
   type StartOptions,
 } from "./backend";
@@ -46,7 +71,11 @@ import { paramIndex, paramNames } from "./param-schema";
 
 const CMD_SLOTS = 1024;
 const CMD_STRIDE = 6;
-const METER_FIELDS = 48;
+// Must match `meterScratch` in dsp/worklet-processor.js — it sizes the shared block the
+// worklet copies its scratch into, so a short array here silently truncates meters.
+// 192 covers engine + per-slot + file + BROBEATS + looper/transport (68..107) +
+// Smart Voice (108..126).
+const METER_FIELDS = 192;
 const SCOPE_SIZE = 8192; // power of two — the worklet masks against it
 const MAX_SLOTS = 24;
 /** Seconds of capture headroom in shared memory. Drained into JS chunks on a timer. */
@@ -86,6 +115,33 @@ function sab(bytes: number): SharedArrayBuffer | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Turns the worklet's flat capture reply into rows.
+ *
+ * The stride travels with the message rather than being assumed, so a DSP-side change to
+ * how many features a capture carries degrades into fewer/more feature axes here instead
+ * of silently shearing every row. Layout is
+ * `[class, ...features, attackLow, attackMid, attackHigh, strength]`.
+ */
+function decodeVoiceCaptures(flat: number[], stride: number): VoiceCapture[] {
+  const featureCount = stride - 5;
+  if (featureCount < 1) return [];
+  const out: VoiceCapture[] = [];
+  for (let o = 0; o + stride <= flat.length; o += stride) {
+    const features = new Float32Array(featureCount);
+    for (let i = 0; i < featureCount; i++) features[i] = flat[o + 1 + i] ?? 0;
+    const attack = new Float32Array(3);
+    for (let i = 0; i < 3; i++) attack[i] = flat[o + 1 + featureCount + i] ?? 0;
+    out.push({
+      cls: (flat[o] ?? -1) | 0,
+      features,
+      attack,
+      strength: flat[o + stride - 1] ?? 0,
+    });
+  }
+  return out;
 }
 
 export class WorkletBackend implements EngineBackend {
@@ -153,6 +209,10 @@ export class WorkletBackend implements EngineBackend {
   private drainTimer: number | null = null;
 
   private visualWaiters = new Map<number, (v: Float32Array | null) => void>();
+  /** Keyed by loop track index — one outstanding waveform pull per track. */
+  private loopPeakWaiters = new Map<number, (v: Float32Array | null) => void>();
+  /** One outstanding calibration-capture pull. The panel polls; it never fans out. */
+  private voiceCapWaiter: ((v: { from: number; total: number; rows: VoiceCapture[] }) => void) | null = null;
   private chainListener: ((order: { id: number; type: string; bypassed: boolean }[], latency: number) => void) | null =
     null;
   private statusListener: ((s: EngineStatus, err: string | null) => void) | null = null;
@@ -253,10 +313,26 @@ export class WorkletBackend implements EngineBackend {
     }
     if (opts.sampleRate) audio.sampleRate = opts.sampleRate;
 
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+    // A missing or refused microphone is not fatal. BROBEATS pads, preset auditioning
+    // and file playback all want the engine running with no input at all, so capture
+    // failure downgrades to output-only instead of refusing to start.
+    let inputError: string | null = null;
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+    } catch (e) {
+      this.stream = null;
+      inputError =
+        e instanceof Error
+          ? e.name === "NotFoundError"
+            ? "No microphone found — running output only."
+            : e.name === "NotAllowedError"
+              ? "Microphone access denied — running output only."
+              : `${e.message} — running output only.`
+          : "Microphone unavailable — running output only.";
+    }
 
     // ---- 2. context -------------------------------------------------------
-    const settings = this.stream.getAudioTracks()[0]?.getSettings() ?? {};
+    const settings = this.stream?.getAudioTracks()[0]?.getSettings() ?? {};
     const wantRate = opts.sampleRate || settings.sampleRate || 48000;
     // latencyHint in seconds. Chromium rounds this to a device period it can honour.
     const hint = opts.bufferFrames ? opts.bufferFrames / wantRate : "interactive";
@@ -317,19 +393,19 @@ export class WorkletBackend implements EngineBackend {
     this.node = node;
 
     // ---- 5. graph ---------------------------------------------------------
-    this.source = ctx.createMediaStreamSource(this.stream);
+    this.source = this.stream ? ctx.createMediaStreamSource(this.stream) : null;
     this.analyser = ctx.createAnalyser();
     this.analyser.fftSize = 4096;
     this.analyser.smoothingTimeConstant = 0.6;
     this.analyser.minDecibels = -100;
 
-    this.source.connect(node);
+    this.source?.connect(node);
     node.connect(this.analyser);
     this.analyser.connect(ctx.destination);
 
     this.startDrainTimer();
 
-    const track = this.stream.getAudioTracks()[0];
+    const track = this.stream?.getAudioTracks()[0];
     const actual = track?.getSettings() ?? {};
     this.engineInfo = {
       sampleRate: ctx.sampleRate,
@@ -338,6 +414,8 @@ export class WorkletBackend implements EngineBackend {
       outputLatency: ctx.outputLatency || ctx.baseLatency || 0,
       engineLatency: 0,
       sharedMemory: this.shared,
+      inputActive: !!this.stream,
+      inputError,
       backend: this.name,
     };
     return this.engineInfo;
@@ -383,10 +461,15 @@ export class WorkletBackend implements EngineBackend {
     order?: { id: number; type: string; bypassed: boolean }[];
     latency?: number;
     id?: number;
+    index?: number;
     data?: number[] | null;
     l?: ArrayBuffer;
     r?: ArrayBuffer;
     frames?: number;
+    from?: number;
+    total?: number;
+    stride?: number;
+    rows?: number[];
   }) {
     if (!m) return;
     switch (m.t) {
@@ -405,6 +488,27 @@ export class WorkletBackend implements EngineBackend {
         if (w) {
           this.visualWaiters.delete(m.id ?? -1);
           w(m.data ? new Float32Array(m.data) : null);
+        }
+        break;
+      }
+      case "looppeaks": {
+        const i = m.index ?? -1;
+        const w = this.loopPeakWaiters.get(i);
+        if (w) {
+          this.loopPeakWaiters.delete(i);
+          w(m.data ? new Float32Array(m.data) : null);
+        }
+        break;
+      }
+      case "voicecaps": {
+        const w = this.voiceCapWaiter;
+        if (w) {
+          this.voiceCapWaiter = null;
+          w({
+            from: m.from ?? 0,
+            total: m.total ?? 0,
+            rows: decodeVoiceCaptures(m.rows ?? [], m.stride ?? VOICE_CAPTURE_STRIDE),
+          });
         }
         break;
       }
@@ -507,7 +611,7 @@ export class WorkletBackend implements EngineBackend {
   // ----------------------------------------------------- realtime control
 
   /** Push one numeric command. Allocation-free on the shared path. */
-  private push(op: number, id: number, key: number, value: number) {
+  private push(op: number, id: number, key: number, value: number, aux1 = 0, aux2 = 0) {
     if (this.cmdHeader && this.cmdData) {
       const w = this.cmdWrite;
       const r = Atomics.load(this.cmdHeader, 1);
@@ -519,12 +623,15 @@ export class WorkletBackend implements EngineBackend {
       this.cmdData[base + 1] = id;
       this.cmdData[base + 2] = key;
       this.cmdData[base + 3] = value;
+      this.cmdData[base + 4] = aux1;
+      this.cmdData[base + 5] = aux2;
       this.cmdWrite = w + 1;
       Atomics.store(this.cmdHeader, 0, this.cmdWrite);
       return;
     }
     // Fallback: batch into one postMessage per animation frame.
-    this.pendingCmds.push(op, id, key, value);
+    // Stride must match the ring's, because the worklet decodes both with one routine.
+    this.pendingCmds.push(op, id, key, value, aux1, aux2);
     if (!this.flushScheduled) {
       this.flushScheduled = true;
       requestAnimationFrame(() => {
@@ -571,6 +678,217 @@ export class WorkletBackend implements EngineBackend {
     this.push(OP.PANIC, 0, 0, 0);
   }
 
+  // ---------------------------------------------------------------- BROBEATS
+
+  triggerPad(index: number, velocity: number): void {
+    this.push(OP.PAD, index, PAD_FIELD.TRIGGER, velocity);
+  }
+
+  releasePad(index: number): void {
+    this.push(OP.PAD, index, PAD_FIELD.RELEASE, 0);
+  }
+
+  setPadParam(index: number, key: PadKey, value: number): void {
+    const k = padKeyIndex(key);
+    if (k < 0) return;
+    this.push(OP.PAD, index, PAD_FIELD.PARAM, value, k);
+  }
+
+  setDrumParam(key: DrumKey, value: number): void {
+    const k = drumKeyIndex(key);
+    if (k < 0) return;
+    this.push(OP.DRUM, 0, k, value);
+  }
+
+  loadPadSample(index: number, layer: number, data: Float32Array, sampleRate: number): void {
+    // Copied into a SharedArrayBuffer when we have one so the audio thread can read it
+    // without a transfer; transferred outright when we do not.
+    const shared = this.sharedFloat(data.length);
+    if (shared) {
+      shared.set(data);
+      this.node?.port.postMessage({
+        t: "padload",
+        index,
+        layer,
+        data: shared.buffer,
+        frames: data.length,
+        rate: sampleRate,
+      });
+      return;
+    }
+    const copy = data.slice();
+    this.node?.port.postMessage(
+      { t: "padload", index, layer, data: copy.buffer, frames: copy.length, rate: sampleRate },
+      [copy.buffer as ArrayBuffer],
+    );
+  }
+
+  clearPad(index: number): void {
+    // One message: the rack's clearPad drops the sample layers and the pad's effect
+    // chain together, and the worklet echoes the now-empty chain back to the UI.
+    this.node?.port.postMessage({ t: "padclear", index });
+  }
+
+  resetDrums(): void {
+    this.node?.port.postMessage({ t: "cmds", list: [{ t: "drumreset" }] });
+  }
+
+  padChainCommand(index: number, cmd: Record<string, unknown>): void {
+    this.node?.port.postMessage({ t: "padfx", index, ...cmd });
+  }
+
+  setPadChainParam(index: number, slotId: number, type: string, key: string, value: number): void {
+    const idx = paramIndex(type, key);
+    if (idx < 0) return;
+    this.push(OP.PADFX, slotId, idx, value, index);
+  }
+
+  // ---------------------------------------------------------------- looper
+
+  // The transport verbs carry no payload: the opcode and the track index are the whole
+  // message, so a punch costs one ring slot between the pointerdown and the arm.
+
+  loopRecord(index: number): void {
+    this.push(OP.LOOP, index, LOOP_FIELD.REC, 0);
+  }
+
+  loopPlay(index: number): void {
+    this.push(OP.LOOP, index, LOOP_FIELD.PLAY, 0);
+  }
+
+  loopStop(index: number): void {
+    this.push(OP.LOOP, index, LOOP_FIELD.STOP, 0);
+  }
+
+  loopClear(index: number): void {
+    this.push(OP.LOOP, index, LOOP_FIELD.CLEAR, 0);
+  }
+
+  loopUndo(index: number): void {
+    this.push(OP.LOOP, index, LOOP_FIELD.UNDO, 0);
+  }
+
+  loopClearAll(): void {
+    this.push(OP.LOOP, 0, LOOP_FIELD.CLEARALL, 0);
+  }
+
+  setLoopParam(index: number, key: LoopKey, value: number): void {
+    const k = loopKeyIndex(key);
+    if (k < 0) return;
+    this.push(OP.LOOP, index, LOOP_FIELD.PARAM, value, k);
+  }
+
+  setLooperParam(key: LooperKey, value: number): void {
+    const k = looperKeyIndex(key);
+    if (k < 0) return;
+    this.push(OP.LOOPER, 0, k, value);
+  }
+
+  setClockParam(key: ClockKey, value: number): void {
+    const k = clockKeyIndex(key);
+    if (k < 0) return;
+    this.push(OP.CLOCK, 0, k, value);
+  }
+
+  loopChainCommand(index: number, cmd: Record<string, unknown>): void {
+    // Structural chain edits need strings, so they go by message rather than the ring.
+    this.node?.port.postMessage({ t: "loopfx", index, ...cmd });
+  }
+
+  setLoopChainParam(index: number, slotId: number, type: string, key: string, value: number): void {
+    const idx = paramIndex(type, key);
+    if (idx < 0) return;
+    this.push(OP.LOOPFX, slotId, idx, value, index);
+  }
+
+  getLoopPeaks(index: number, buckets: number): Promise<Float32Array | null> {
+    if (!this.node) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      // One waiter per track. A second pull for the same track while the first is still
+      // in flight resolves the first with null rather than leaving it hanging forever.
+      const prev = this.loopPeakWaiters.get(index);
+      if (prev) prev(null);
+      this.loopPeakWaiters.set(index, resolve);
+      this.node?.port.postMessage({ t: "getlooppeaks", index, buckets });
+      setTimeout(() => {
+        if (this.loopPeakWaiters.get(index) === resolve) {
+          this.loopPeakWaiters.delete(index);
+          resolve(null);
+        }
+      }, 500);
+    });
+  }
+
+  // ----------------------------------------------------------- Smart Voice
+
+  // Everything here is one ring slot: Smart Voice is calibrated while audio runs, and a
+  // nudged centroid or a re-armed capture must not cost a message round trip.
+
+  setVoiceParam(key: VoiceKey, value: number): void {
+    const k = voiceKeyIndex(key);
+    if (k < 0) return;
+    this.push(OP.VOICE, 0, k, value);
+  }
+
+  setVoiceCentroid(cls: number, feature: number, value: number): void {
+    this.push(OP.VOICECAL, cls, VOICE_CAL.CENTROID, value, feature);
+  }
+
+  setVoiceAttackCentroid(cls: number, band: number, value: number): void {
+    this.push(OP.VOICECAL, cls, VOICE_CAL.ATTACK, value, band);
+  }
+
+  setVoiceClassPad(cls: number, pad: number): void {
+    // A negative pad mutes the class; it rides in `value` untouched.
+    this.push(OP.VOICECAL, cls, VOICE_CAL.PAD, pad);
+  }
+
+  setVoiceCapture(cls: number): void {
+    // The class to capture rides in `value`, matching the DSP's own -1-to-disarm rule.
+    this.push(OP.VOICECAL, 0, VOICE_CAL.CAPTURE, cls);
+  }
+
+  clearVoiceCaptures(): void {
+    this.push(OP.VOICECAL, 0, VOICE_CAL.CLEAR, 0);
+  }
+
+  resetVoiceCentroids(): void {
+    this.push(OP.VOICECAL, 0, VOICE_CAL.RESET, 0);
+  }
+
+  resetVoiceDetector(): void {
+    this.push(OP.VOICECAL, 0, VOICE_CAL.DETRESET, 0);
+  }
+
+  getVoiceCaptures(from: number, max: number): Promise<{ from: number; total: number; rows: VoiceCapture[] }> {
+    const empty = { from: 0, total: 0, rows: [] as VoiceCapture[] };
+    if (!this.node) return Promise.resolve(empty);
+    return new Promise((resolve) => {
+      // Single outstanding pull. A second one while the first is in flight resolves the
+      // first empty rather than leaving the panel's await hanging.
+      const prev = this.voiceCapWaiter;
+      if (prev) prev(empty);
+      this.voiceCapWaiter = resolve;
+      this.node?.port.postMessage({ t: "getvoicecaps", from, max });
+      setTimeout(() => {
+        if (this.voiceCapWaiter === resolve) {
+          this.voiceCapWaiter = null;
+          resolve(empty);
+        }
+      }, 500);
+    });
+  }
+
+  /** A SharedArrayBuffer-backed Float32Array, or null when SAB is unavailable. */
+  private sharedFloat(length: number): Float32Array | null {
+    if (typeof SharedArrayBuffer === "undefined") return null;
+    try {
+      return new Float32Array(new SharedArrayBuffer(length * 4));
+    } catch {
+      return null;
+    }
+  }
+
   // ------------------------------------------------------------- telemetry
 
   readMeters(out: EngineMeters): boolean {
@@ -613,6 +931,54 @@ export class WorkletBackend implements EngineBackend {
     out.filePosition = src[40];
     out.filePlaying = src[41] >= 0.5;
     out.fileLevel = src[44];
+    for (let i = 0; i < PAD_COUNT; i++) out.pads[i] = src[48 + i];
+    out.drumLevelL = src[64];
+    out.drumLevelR = src[65];
+    out.padsFired = src[66] | 0;
+
+    // Looper: LOOP_TRACKS blocks of LOOP_METER_STRIDE, then the transport. Decoded into
+    // the reused per-track objects rather than fresh ones — this runs every UI frame.
+    for (let i = 0; i < LOOP_TRACKS; i++) {
+      const o = LOOP_METER_BASE + i * LOOP_METER_STRIDE;
+      const t = out.loops[i];
+      if (!t) continue;
+      t.state = src[o] | 0;
+      t.pending = src[o + 1] | 0;
+      t.level = src[o + 2];
+      t.position = src[o + 3];
+      t.frames = src[o + 4];
+      t.chainLength = src[o + 5] | 0;
+      t.layers = src[o + 6] | 0;
+      t.canUndo = src[o + 7] >= 0.5;
+    }
+    const tb = TRANSPORT_METER_BASE;
+    out.bpm = src[tb];
+    out.beatsPerBar = src[tb + 1];
+    out.quantize = src[tb + 2];
+    out.clockRunning = src[tb + 3] >= 0.5;
+    out.barPhase = src[tb + 4];
+    out.bar = src[tb + 5] | 0;
+    out.loopLevelL = src[tb + 6];
+    out.loopLevelR = src[tb + 7];
+
+    // Smart Voice: the detector's own readouts, then the live attack bands, then the
+    // class -> pad map. Decoded into the meters object's existing arrays, never new ones.
+    const vb = VOICE_METER_BASE;
+    const v = out.voice;
+    v.enabled = src[vb] >= 0.5;
+    v.hits = src[vb + 1] | 0;
+    v.lastClass = src[vb + 2] | 0;
+    v.lastConf = src[vb + 3];
+    v.lastVel = src[vb + 4];
+    v.lastStage = src[vb + 5] | 0;
+    v.level = src[vb + 6];
+    v.lastStrength = src[vb + 7];
+    v.captureClass = src[vb + 8] | 0;
+    v.captureCount = src[vb + 9] | 0;
+    v.corrections = src[vb + 10] | 0;
+    v.onsets = src[vb + 11] | 0;
+    for (let i = 0; i < 3; i++) v.band[i] = src[vb + VOICE_METER_STRIDE + i];
+    for (let c = 0; c < VOICE_CLASS_COUNT; c++) v.classPads[c] = src[vb + VOICE_METER_STRIDE + 3 + c] | 0;
 
     // Chromium exposes a real render-capacity measurement; prefer it over our own
     // in-worklet timing when available, since it accounts for the whole graph.

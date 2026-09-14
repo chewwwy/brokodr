@@ -34,10 +34,46 @@ import {
   FILE_ROUTE,
   IO_FIELD,
   type LoadedFile,
+  LOOP_SOURCE,
+  LOOP_TRACKS,
+  MAX_BPM,
+  MIN_BPM,
+  PAD_COUNT,
+  type PadKey,
   type ScopeFrame,
   type StartOptions,
+  VOICE_ATTACK_COUNT,
+  type VoiceCapture,
+  VOICE_CLASS_COUNT,
+  VOICE_DEFAULTS,
+  VOICE_FEATURE_COUNT,
+  VOICE_KEY,
+  type VoiceKey,
+  VOICE_RANGE,
 } from "./backend";
+import {
+  applyDefaultLayout,
+  DEFAULT_PAD_PARAMS,
+  emptyKit,
+  exportKit as exportKitDoc,
+  importKit,
+  type KitDocument,
+  type KitState,
+  loadDrumSynth,
+  type PadState,
+  type PadSlotState,
+  renderPad,
+  synthParamsFor,
+  type VoiceProfile,
+} from "./kit";
 import { isNativeAvailable, NativeBackend, NATIVE_UNAVAILABLE_REASON } from "./native-backend";
+import { getSample, newSampleId, putSample } from "./sample-store";
+import {
+  trainVoiceProfile,
+  untrainVoiceProfile,
+  type VoiceTrainResult,
+} from "./voice-train";
+import { SYNTH_PARAM_DEFS } from "./pad-params";
 import { defaultParams, EFFECTS, withDefaults } from "./param-schema";
 import { WorkletBackend } from "./worklet-backend";
 
@@ -107,6 +143,41 @@ export const DEFAULT_FILE_STATE: FileState = {
   route: FILE_ROUTE.INPUT,
 };
 
+/**
+ * UI mirror of one loop track. Same rule as the chain: the audio thread owns the sound,
+ * this owns the state, and the transport/state readouts (position, layers, length) come
+ * from the meter block instead of living here.
+ */
+export interface LoopTrackState {
+  index: number;
+  name: string;
+  /** dB. */
+  gain: number;
+  /** -1..1. */
+  pan: number;
+  mute: boolean;
+  solo: boolean;
+  /** Tempo-locked to the clock rather than free-running. */
+  sync: boolean;
+  /** LOOP_SOURCE value: master bus or the BROBEATS bus alone. */
+  source: number;
+  /** This track's own effect chain — the same slot shape a pad chain uses. */
+  chain: PadSlotState[];
+}
+
+/** UI mirror of the loop deck and the transport that drives it. Session-only for now. */
+export interface LoopDeckState {
+  tracks: LoopTrackState[];
+  /** Looper bus gain in dB. */
+  gain: number;
+  mute: boolean;
+  bpm: number;
+  beatsPerBar: number;
+  /** Punch quantise grid in beats. 0 is off. */
+  quantize: number;
+  running: boolean;
+}
+
 export interface ClientSnapshot {
   status: EngineStatus;
   error: string | null;
@@ -121,6 +192,32 @@ export interface ClientSnapshot {
   activePresetId: string | null;
   dirty: boolean;
   fileState: FileState;
+  /** BROBEATS: the sixteen pads, their voices, their chains and the kit mixer. */
+  kit: KitState;
+  /** The loop deck: four tracks and the transport. Not persisted yet. */
+  loops: LoopDeckState;
+}
+
+export function emptyLoopDeck(): LoopDeckState {
+  return {
+    tracks: Array.from({ length: LOOP_TRACKS }, (_, i) => ({
+      index: i,
+      name: `LOOP ${i + 1}`,
+      gain: 0,
+      pan: 0,
+      mute: false,
+      solo: false,
+      sync: true,
+      source: LOOP_SOURCE.MASTER,
+      chain: [],
+    })),
+    gain: 0,
+    mute: false,
+    bpm: 120,
+    beatsPerBar: 4,
+    quantize: 4,
+    running: true,
+  };
 }
 
 export const BUFFER_CHOICES = [128, 256, 384, 512, 768, 1024, 2048];
@@ -128,6 +225,7 @@ export const SAMPLE_RATE_CHOICES = [44100, 48000, 88200, 96000];
 
 const SETTINGS_KEY = "brokodr.devices.v1";
 const CHAIN_KEY = "brokodr.chain.v1";
+const KIT_KEY = "brokodr.kit.v1";
 
 export const DEFAULT_IO: IoState = {
   inGain: 0,
@@ -160,7 +258,11 @@ export class EngineClient {
 
   /** Live meter block. Mutated in place at poll rate — read it, never store it. */
   readonly meters: EngineMeters = createMeters();
-  readonly scope: ScopeFrame = { input: new Float32Array(2048), output: new Float32Array(2048) };
+  readonly scope: ScopeFrame = {
+    input: new Float32Array(2048),
+    output: new Float32Array(2048),
+    frames: 0,
+  };
 
   constructor() {
     this.worklet = new WorkletBackend();
@@ -190,6 +292,8 @@ export class EngineClient {
       activePresetId: null,
       dirty: false,
       fileState: { ...DEFAULT_FILE_STATE },
+      kit: importKit(loadKitDoc()),
+      loops: emptyLoopDeck(),
     };
 
     const restored = loadChain();
@@ -198,6 +302,15 @@ export class EngineClient {
       this.snap.io = restored.io;
       this.nextId = restored.slots.reduce((m, s) => Math.max(m, s.id), 0) + 1;
     }
+    // Pad-chain slot ids share the master chain's id space, so nothing collides when a
+    // pad effect and a rack effect are both addressed by id.
+    for (const p of this.snap.kit.pads) {
+      for (const s of p.chain) this.nextId = Math.max(this.nextId, s.id + 1);
+    }
+
+    // Warm the generator now so the grid can show the stock kit before the engine is
+    // started. Buffers only reach the audio thread once there is an engine to take them.
+    void this.initKit();
   }
 
   // ------------------------------------------------------------ react glue
@@ -256,6 +369,8 @@ export class EngineClient {
     // Replay the mirrored state onto the fresh engine, in one message.
     this.pushChain();
     this.pushIo();
+    void this.pushKit();
+    this.pushLoops();
     this.update({ info, status: this.backend.status(), error: null, backendName: this.backend.name });
     await this.refreshDevices();
   }
@@ -279,6 +394,9 @@ export class EngineClient {
       const info = await this.backend.restart(this.startOptions());
       this.pushChain();
       this.pushIo();
+      // Synth pads are rendered at the engine's rate, so a rate change re-renders them.
+      void this.pushKit();
+      this.pushLoops();
       this.update({ info, status: this.backend.status() });
     }
   }
@@ -441,6 +559,890 @@ export class EngineClient {
     this.backend.panic();
   }
 
+  // --------------------------------------------------------------- brobeats
+
+  /**
+   * Loads the generator and, on a first run, lays out the stock kit. Safe to call more
+   * than once — a kit restored from storage is left exactly as the user left it.
+   */
+  private async initKit(): Promise<void> {
+    const mod = await loadDrumSynth();
+    if (!mod) {
+      // Without the generator the pads still work; they just start empty and wait for
+      // the user to drop samples in. Worth saying so rather than failing silently.
+      this.updateKit({ ready: true });
+      return;
+    }
+    const blank = this.snap.kit.pads.every((p) => p.source.kind === "empty");
+    const kit = blank ? applyDefaultLayout(this.snap.kit) : this.snap.kit;
+    this.snap = { ...this.snap, kit: { ...kit, ready: true } };
+    saveKitDoc(exportKitDoc(this.snap.kit));
+    this.emit();
+    await this.restoreKitSamples();
+    if (this.snap.status === "running") await this.pushKit();
+  }
+
+  /**
+   * Replays the whole kit onto a fresh engine: voice params, pad chains, kit mixer, and
+   * a freshly rendered one-shot for every synth pad. Sample pads whose audio only ever
+   * lived in memory come back empty — the pad keeps its name so the user can see what to
+   * re-drop.
+   */
+  private async pushKit(): Promise<void> {
+    const kit = this.snap.kit;
+    this.backend.setDrumParam("gain", kit.gain);
+    this.backend.setDrumParam("mute", kit.mute ? 1 : 0);
+    this.backend.setDrumParam("solo", kit.solo);
+    this.backend.setDrumParam("route", kit.route);
+    this.pushVoice();
+
+    await loadDrumSynth();
+    const sr = this.sampleRate();
+    for (const pad of kit.pads) {
+      for (const key in pad.params) {
+        this.backend.setPadParam(pad.index, key as PadKey, pad.params[key]);
+      }
+      this.backend.padChainCommand(pad.index, { op: "clear" });
+      for (const slot of pad.chain) {
+        this.backend.padChainCommand(pad.index, {
+          op: "add",
+          id: slot.id,
+          type: slot.type,
+          params: slot.params,
+          mix: slot.mix,
+          bypassed: slot.bypassed,
+        });
+      }
+      if (pad.source.kind === "synth") this.renderSynthPad(pad.index, sr);
+      // Sample pads come back from the sample store rather than from memory. That is
+      // what makes a restored kit audible instead of a grid of names, and it also closes
+      // an older hole: a sample dropped while the engine was in standby never reached
+      // the worklet, because there was no node to post it to. Now it is on disk (or in
+      // IndexedDB) by then, so ENGAGE picks it up like any other.
+      else if (pad.source.kind === "sample" && pad.source.sampleId) {
+        await this.restorePadSample(pad.index);
+      }
+    }
+  }
+
+  /**
+   * Writes a pad's audio to the sample store and confirms the id on the pad.
+   *
+   * Fire-and-forget on purpose: a drop must feel instant and must not wait on a disk or
+   * an IndexedDB transaction, and the sound is already playing from memory by the time
+   * this starts. If the write fails the id is cleared, so the pad honestly reads as
+   * "loaded now, gone after a reload" rather than pointing at audio that isn't there.
+   */
+  private storeSample(
+    index: number,
+    id: string,
+    name: string,
+    data: Float32Array,
+    sampleRate: number,
+  ): void {
+    // A copy, because the caller's buffer may be a view into a larger capture that the
+    // editor goes on to mutate — the store must keep what was sent, not what it becomes.
+    const snapshot = data.slice();
+    void putSample(name, snapshot, sampleRate, id).then((meta) => {
+      const pad = this.snap.kit.pads[index];
+      if (!pad || pad.source.sampleId !== id) return; // pad moved on; nothing to confirm
+      if (meta) return;
+      this.updatePad(index, { source: { ...pad.source, sampleId: null } });
+    });
+  }
+
+  /**
+   * Pulls one pad's audio back out of the sample store and into its voice. Returns false
+   * when the sample is gone — the pad then keeps its name and stays silent, which is the
+   * same place a kit from before the store existed lands.
+   */
+  private async restorePadSample(index: number): Promise<boolean> {
+    const pad = this.snap.kit.pads[index];
+    const id = pad?.source.sampleId;
+    if (!pad || pad.source.kind !== "sample" || !id) return false;
+    const stored = await getSample(id);
+    if (!stored || stored.data.length === 0) return false;
+    this.backend.loadPadSample(index, 0, stored.data, stored.meta.sampleRate);
+    // Straight into the snapshot rather than through updatePad: this is restoring what
+    // the document already says, so it must not mark anything dirty or rewrite the kit.
+    const current = this.snap.kit.pads[index];
+    const pads = [...this.snap.kit.pads];
+    pads[index] = {
+      ...current,
+      source: { ...current.source, frames: stored.data.length, sampleRate: stored.meta.sampleRate },
+    };
+    this.snap = { ...this.snap, kit: { ...this.snap.kit, pads } };
+    return true;
+  }
+
+  /**
+   * Restores every sample pad in the current kit. Run once at startup so the grid shows
+   * real waveform lengths before the engine is even started.
+   */
+  private async restoreKitSamples(): Promise<void> {
+    const ids = this.snap.kit.pads
+      .filter((p) => p.source.kind === "sample" && p.source.sampleId)
+      .map((p) => p.index);
+    if (!ids.length) return;
+    let any = false;
+    for (const i of ids) any = (await this.restorePadSample(i)) || any;
+    if (any) this.emit();
+  }
+
+  /** Every sample id the current kit points at — the live set for `pruneSamples()`. */
+  usedSampleIds(): string[] {
+    const ids = new Set<string>();
+    for (const p of this.snap.kit.pads) if (p.source.sampleId) ids.add(p.source.sampleId);
+    return [...ids];
+  }
+
+  /** Renders a synth pad's one-shot here and hands the finished buffer to the voice. */
+  private renderSynthPad(index: number, sampleRate?: number): boolean {
+    const pad = this.snap.kit.pads[index];
+    if (!pad || pad.source.kind !== "synth") return false;
+    const sr = sampleRate ?? this.sampleRate();
+    const res = renderPad(pad.source.synth, sr, pad.source.synthParams);
+    if (!res) return false;
+    this.backend.loadPadSample(index, 0, res.data.subarray(0, res.frames), sr);
+    const pads = [...this.snap.kit.pads];
+    pads[index] = { ...pad, source: { ...pad.source, frames: res.frames, sampleRate: sr } };
+    this.snap = { ...this.snap, kit: { ...this.snap.kit, pads } };
+    return true;
+  }
+
+  private updateKit(patch: Partial<KitState>, persist = true) {
+    const kit = { ...this.snap.kit, ...patch };
+    this.snap = { ...this.snap, kit };
+    if (persist) saveKitDoc(exportKitDoc(kit));
+    this.emit();
+  }
+
+  /** Replaces one pad and re-emits. Every pad mutation goes through here. */
+  private updatePad(index: number, patch: Partial<PadState>, persist = true) {
+    const pads = [...this.snap.kit.pads];
+    const pad = pads[index];
+    if (!pad) return;
+    pads[index] = { ...pad, ...patch };
+    this.updateKit({ pads }, persist);
+  }
+
+  // --- performance
+
+  /** Fire a pad. The hot path: the grid, the keyboard, and later Smart Voice. */
+  triggerPad(index: number, velocity = 1) {
+    this.backend.triggerPad(index, velocity);
+  }
+
+  releasePad(index: number) {
+    this.backend.releasePad(index);
+  }
+
+  // --- voice
+
+  setPadParam(index: number, key: PadKey, value: number) {
+    const pad = this.snap.kit.pads[index];
+    if (!pad || pad.params[key] === value) return;
+    this.backend.setPadParam(index, key, value);
+    this.updatePad(index, { params: { ...pad.params, [key]: value } });
+  }
+
+  resetPadParams(index: number) {
+    const pad = this.snap.kit.pads[index];
+    if (!pad) return;
+    const params = { ...DEFAULT_PAD_PARAMS };
+    for (const key in params) this.backend.setPadParam(index, key as PadKey, params[key]);
+    this.updatePad(index, { params });
+  }
+
+  setPadName(index: number, name: string) {
+    this.updatePad(index, { name });
+  }
+
+  // --- pad content
+
+  /** Points a pad at a generator kind and renders it. */
+  setPadSynth(index: number, kind: string, overrides?: Record<string, number>) {
+    const pad = this.snap.kit.pads[index];
+    if (!pad) return;
+    this.updatePad(index, {
+      source: {
+        kind: "synth",
+        synth: kind,
+        synthParams: { ...(overrides || {}) },
+        sampleName: null,
+        sampleId: null,
+        frames: 0,
+        sampleRate: 0,
+      },
+    });
+    this.renderSynthPad(index);
+    this.emit();
+  }
+
+  /** Turns one generator knob and re-renders that pad. Cheap enough to do live. */
+  setPadSynthParam(index: number, key: string, value: number) {
+    const pad = this.snap.kit.pads[index];
+    if (!pad || pad.source.kind !== "synth") return;
+    // Clamp to the generator's declared range. The knob already does this, but an
+    // imported kit or a scripted call can hand us anything, and drum-synth.js has no
+    // guard of its own — an out-of-range tune renders a broken one-shot, not an error.
+    const def = (SYNTH_PARAM_DEFS[pad.source.synth] || []).find((d) => d.key === key);
+    const v = def ? Math.min(def.max, Math.max(def.min, value)) : value;
+    const synthParams = { ...pad.source.synthParams, [key]: v };
+    this.updatePad(index, { source: { ...pad.source, synthParams } });
+    this.renderSynthPad(index);
+    this.emit();
+  }
+
+  /** Effective generator settings for a synth pad: stock values plus its overrides. */
+  padSynthParams(index: number): Record<string, number> {
+    const pad = this.snap.kit.pads[index];
+    if (!pad || pad.source.kind !== "synth") return {};
+    return synthParamsFor(pad.source.synth, pad.source.synthParams);
+  }
+
+  /**
+   * Drops a user sample onto a pad. Decoding needs a running AudioContext, so the engine
+   * must be started first — the grid says so rather than swallowing the drop.
+   *
+   * The voice plays mono buffers, so a stereo file is summed. That is the right call for
+   * a drum: the pad has its own pan, and a stereo sample would fight it.
+   */
+  async loadPadFile(index: number, file: File, layer = 0): Promise<string | null> {
+    try {
+      const ctx = this.backend.context();
+      if (!ctx) return "Start the engine before loading a sample";
+      const buf = await ctx.decodeAudioData(await file.arrayBuffer());
+      const frames = buf.length;
+      const mono = new Float32Array(frames);
+      const chans = Math.max(1, buf.numberOfChannels);
+      for (let c = 0; c < chans; c++) {
+        const src = buf.getChannelData(c);
+        for (let i = 0; i < frames; i++) mono[i] += src[i];
+      }
+      if (chans > 1) for (let i = 0; i < frames; i++) mono[i] /= chans;
+
+      this.backend.loadPadSample(index, layer, mono, buf.sampleRate);
+      const sampleId = newSampleId();
+      this.updatePad(index, {
+        name: file.name.replace(/\.[^.]+$/, "").slice(0, 18),
+        source: {
+          kind: "sample",
+          synth: "",
+          synthParams: {},
+          sampleName: file.name,
+          sampleId,
+          frames,
+          sampleRate: buf.sampleRate,
+        },
+      });
+      this.storeSample(index, sampleId, file.name, mono, buf.sampleRate);
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Drops an already-decoded mono buffer onto a pad.
+   *
+   * This is what the sample editor sends through: by the time a slice or a trimmed take
+   * reaches a pad it is PCM in memory, never a File, so routing it back through
+   * `loadPadFile` would mean re-encoding a WAV only to decode it again. The two share the
+   * same tail — hand the backend the buffer, then describe it on the pad — and the mono
+   * sum has already happened in `sample-edit.ts`.
+   *
+   * Unlike `loadPadFile` this needs no AudioContext, so it works with the engine in
+   * standby: the buffer is staged and plays on ENGAGE.
+   */
+  loadPadBuffer(index: number, mono: Float32Array, sampleRate: number, name: string, layer = 0) {
+    const pad = this.snap.kit.pads[index];
+    if (!pad) return;
+    this.backend.loadPadSample(index, layer, mono, sampleRate);
+    const sampleId = newSampleId();
+    this.updatePad(index, {
+      name: name.slice(0, 18),
+      source: {
+        kind: "sample",
+        synth: "",
+        synthParams: {},
+        sampleName: name,
+        sampleId,
+        frames: mono.length,
+        sampleRate,
+      },
+    });
+    this.storeSample(index, sampleId, name, mono, sampleRate);
+    this.emit();
+  }
+
+  /** Empties a pad — sample layers and its effect chain both. */
+  clearPad(index: number) {
+    const pad = this.snap.kit.pads[index];
+    if (!pad) return;
+    this.backend.clearPad(index);
+    this.updatePad(index, {
+      name: `Pad ${index + 1}`,
+      // The audio itself is left in the sample store: the same id can be on other pads
+      // and inside saved kits, so clearing a pad is not a licence to delete a sound.
+      // `pruneSamples()` is the deliberate sweep for that.
+      source: {
+        kind: "empty",
+        synth: "",
+        synthParams: {},
+        sampleName: null,
+        sampleId: null,
+        frames: 0,
+        sampleRate: 0,
+      },
+      chain: [],
+    });
+  }
+
+  // --- kit mixer
+
+  setKitGain(db: number) {
+    this.backend.setDrumParam("gain", db);
+    this.updateKit({ gain: db });
+  }
+
+  setKitMute(mute: boolean) {
+    this.backend.setDrumParam("mute", mute ? 1 : 0);
+    this.updateKit({ mute });
+  }
+
+  /** Solo is a performance control, so it is not persisted with the kit. */
+  setKitSolo(index: number) {
+    const solo = this.snap.kit.solo === index ? -1 : index;
+    this.backend.setDrumParam("solo", solo);
+    this.updateKit({ solo }, false);
+  }
+
+  setKitRoute(route: number) {
+    this.backend.setDrumParam("route", route);
+    this.updateKit({ route });
+  }
+
+  setKitName(name: string) {
+    this.updateKit({ name });
+  }
+
+  // --- pad effect chains
+
+  addPadEffect(index: number, type: string, at?: number): number | null {
+    const pad = this.snap.kit.pads[index];
+    if (!pad || !EFFECTS[type]) return null;
+    const slot: PadSlotState = {
+      id: this.nextId++,
+      type,
+      params: defaultParams(type),
+      mix: EFFECTS[type].defaultMix,
+      bypassed: false,
+    };
+    const chain = [...pad.chain];
+    const pos = at === undefined ? chain.length : Math.max(0, Math.min(at, chain.length));
+    chain.splice(pos, 0, slot);
+    this.backend.padChainCommand(index, {
+      op: "add",
+      id: slot.id,
+      type,
+      params: slot.params,
+      mix: slot.mix,
+      bypassed: false,
+      index: pos,
+    });
+    this.updatePad(index, { chain });
+    return slot.id;
+  }
+
+  removePadEffect(index: number, id: number) {
+    const pad = this.snap.kit.pads[index];
+    if (!pad) return;
+    this.backend.padChainCommand(index, { op: "remove", id });
+    this.updatePad(index, { chain: pad.chain.filter((s) => s.id !== id) });
+  }
+
+  movePadEffect(index: number, id: number, at: number) {
+    const pad = this.snap.kit.pads[index];
+    if (!pad) return;
+    const chain = [...pad.chain];
+    const from = chain.findIndex((s) => s.id === id);
+    if (from < 0) return;
+    const to = Math.max(0, Math.min(at, chain.length - 1));
+    if (from === to) return;
+    const [s] = chain.splice(from, 1);
+    chain.splice(to, 0, s);
+    this.backend.padChainCommand(index, { op: "move", id, at: to });
+    this.updatePad(index, { chain });
+  }
+
+  setPadEffectParam(index: number, id: number, key: string, value: number) {
+    const pad = this.snap.kit.pads[index];
+    if (!pad) return;
+    const i = pad.chain.findIndex((s) => s.id === id);
+    if (i < 0 || pad.chain[i].params[key] === value) return;
+    // Realtime params go down the ring buffer; the mirror updates after.
+    this.backend.setPadChainParam(index, id, pad.chain[i].type, key, value);
+    const chain = [...pad.chain];
+    chain[i] = { ...chain[i], params: { ...chain[i].params, [key]: value } };
+    this.updatePad(index, { chain });
+  }
+
+  setPadEffectMix(index: number, id: number, value: number) {
+    const pad = this.snap.kit.pads[index];
+    if (!pad) return;
+    const i = pad.chain.findIndex((s) => s.id === id);
+    if (i < 0) return;
+    this.backend.padChainCommand(index, { op: "mix", id, value });
+    const chain = [...pad.chain];
+    chain[i] = { ...chain[i], mix: value };
+    this.updatePad(index, { chain });
+  }
+
+  setPadEffectBypass(index: number, id: number, bypassed: boolean) {
+    const pad = this.snap.kit.pads[index];
+    if (!pad) return;
+    const i = pad.chain.findIndex((s) => s.id === id);
+    if (i < 0) return;
+    this.backend.padChainCommand(index, { op: "bypass", id, value: bypassed ? 1 : 0 });
+    const chain = [...pad.chain];
+    chain[i] = { ...chain[i], bypassed };
+    this.updatePad(index, { chain });
+  }
+
+  clearPadChain(index: number) {
+    if (!this.snap.kit.pads[index]) return;
+    this.backend.padChainCommand(index, { op: "clear" });
+    this.updatePad(index, { chain: [] });
+  }
+
+  // ----------------------------------------------------------- smart voice
+  //
+  // The detector's state lives in the kit document (a calibration belongs to the mouth
+  // *and* the sounds it was trained against), so every mutation here goes through
+  // `updateKit` and autosaves with the rest of the kit.
+  //
+  // Live readouts — what it last heard, how confident it was, how many hits it has
+  // detected — are not here. They come off the meter block as `meters.voice`, the same
+  // way pad levels do: state on this side, measurement from the audio thread.
+
+  /** Replays the profile onto a fresh engine. Called as part of `pushKit`. */
+  private pushVoice() {
+    const v = this.snap.kit.voice;
+    for (const key of VOICE_KEY) {
+      const value = v.params[key];
+      if (value !== undefined) this.backend.setVoiceParam(key, value);
+    }
+    for (let c = 0; c < VOICE_CLASS_COUNT; c++) {
+      this.backend.setVoiceClassPad(c, v.classPads[c] ?? -1);
+    }
+    // Factory rows are left alone rather than pushed as zeros: an untrained class must
+    // keep the measured table `beat-classify.js` ships, not a centroid at the origin.
+    this.backend.resetVoiceCentroids();
+    for (let c = 0; c < VOICE_CLASS_COUNT; c++) {
+      if (!v.trained[c]) continue;
+      for (let f = 0; f < VOICE_FEATURE_COUNT; f++) {
+        this.backend.setVoiceCentroid(c, f, v.centroids[c * VOICE_FEATURE_COUNT + f] ?? 0);
+      }
+      for (let b = 0; b < VOICE_ATTACK_COUNT; b++) {
+        this.backend.setVoiceAttackCentroid(c, b, v.attack[c * VOICE_ATTACK_COUNT + b] ?? 0);
+      }
+    }
+  }
+
+  private updateVoice(patch: Partial<VoiceProfile>) {
+    this.updateKit({ voice: { ...this.snap.kit.voice, ...patch } });
+  }
+
+  /** Master switch. Off means the detector is not even run, so it costs nothing. */
+  setVoiceEnabled(on: boolean) {
+    this.setVoiceParam("enabled", on ? 1 : 0);
+  }
+
+  get voiceEnabled(): boolean {
+    return (this.snap.kit.voice.params.enabled ?? 0) >= 0.5;
+  }
+
+  /** One detector parameter, clamped to its published range before it reaches the ring. */
+  setVoiceParam(key: VoiceKey, value: number) {
+    if (!Number.isFinite(value)) return;
+    const r = VOICE_RANGE[key];
+    const v = Math.max(r.min, Math.min(r.max, value));
+    const params = this.snap.kit.voice.params;
+    if (params[key] === v) return;
+    this.backend.setVoiceParam(key, v);
+    this.updateVoice({ params: { ...params, [key]: v } });
+  }
+
+  /** Every detector parameter back to factory. Calibration is untouched. */
+  resetVoiceParams() {
+    const params: Record<string, number> = {};
+    for (const key of VOICE_KEY) {
+      params[key] = VOICE_DEFAULTS[key];
+      this.backend.setVoiceParam(key, VOICE_DEFAULTS[key]);
+    }
+    this.updateVoice({ params });
+  }
+
+  /** Route a class to a pad, or -1 to make that class fire nothing. */
+  setVoiceClassPad(cls: number, pad: number) {
+    if (cls < 0 || cls >= VOICE_CLASS_COUNT) return;
+    const p = pad >= 0 && pad < PAD_COUNT ? pad | 0 : -1;
+    const classPads = [...this.snap.kit.voice.classPads];
+    if (classPads[cls] === p) return;
+    classPads[cls] = p;
+    this.backend.setVoiceClassPad(cls, p);
+    this.updateVoice({ classPads });
+  }
+
+  // --- calibration
+
+  /**
+   * Arms capture for one class: from now, every onset is stored with both its feature
+   * vectors instead of only being classified. Pass -1 to stop.
+   *
+   * Nothing is trained until `applyVoiceCalibration` is called, so an armed detector is
+   * safe to leave running and a bad take can simply be cleared.
+   */
+  captureVoiceClass(cls: number) {
+    this.backend.setVoiceCapture(cls >= 0 && cls < VOICE_CLASS_COUNT ? cls | 0 : -1);
+  }
+
+  stopVoiceCapture() {
+    this.backend.setVoiceCapture(-1);
+  }
+
+  clearVoiceCaptures() {
+    this.backend.clearVoiceCaptures();
+  }
+
+  /** Drops any half-measured onset. Worth a call on device change or mode switch. */
+  resetVoiceDetector() {
+    this.backend.resetVoiceDetector();
+  }
+
+  /**
+   * Pulls captured hits for the calibration panel. `from` is an absolute capture index —
+   * pass the count you have already seen and you get only what is new. The reply says
+   * where it actually starts, because the ring holds the last 64 and a slow poll can
+   * miss hits.
+   */
+  pullVoiceCaptures(from = 0, max = 64): Promise<{ from: number; total: number; rows: VoiceCapture[] }> {
+    return this.backend.getVoiceCaptures(from, max);
+  }
+
+  /**
+   * Turns captured hits into this kit's centroid tables, pushes them, and saves.
+   *
+   * Returns the per-class outcome so the panel can say "kick: 7 of 8 used" and refuse to
+   * claim a class was calibrated when it wasn't — a class with too few usable hits keeps
+   * the factory row (see `voice-train.ts`).
+   */
+  applyVoiceCalibration(rows: VoiceCapture[]): VoiceTrainResult {
+    const result = trainVoiceProfile(this.snap.kit.voice, rows);
+    this.updateVoice(result.profile);
+    if (this.snap.status === "running") this.pushVoice();
+    return result;
+  }
+
+  /**
+   * Puts a whole profile back exactly as it was — the calibration panel's undo.
+   *
+   * `applyVoiceCalibration` is not reversible by `resetVoiceCalibration`: reset puts a
+   * class back to *factory*, which is the wrong answer for someone who had a good
+   * calibration, ran a bad take over the top of it, and wants their old one. The panel
+   * snapshots the profile before a pass and hands it back here.
+   */
+  restoreVoiceProfile(profile: VoiceProfile) {
+    this.updateVoice(profile);
+    if (this.snap.status === "running") this.pushVoice();
+  }
+
+  /** Forgets calibration for one class, or every class with -1. Params survive. */
+  resetVoiceCalibration(cls = -1) {
+    this.updateVoice(untrainVoiceProfile(this.snap.kit.voice, cls));
+    if (this.snap.status === "running") this.pushVoice();
+  }
+
+  // ------------------------------------------------------------------ looper
+  //
+  // Recorded audio is session-only: it lives in the engine's track buffers and nowhere
+  // else. Saving loops alongside a kit is a later phase, so nothing here touches
+  // localStorage or the sample store. An engine restart replays the mixer and the
+  // transport (`pushLoops`) and the takes are gone — which is honest, because the audio
+  // that recorded them is gone too.
+
+  private updateLoops(patch: Partial<LoopDeckState>) {
+    this.snap = { ...this.snap, loops: { ...this.snap.loops, ...patch } };
+    this.emit();
+  }
+
+  private updateLoopTrack(index: number, patch: Partial<LoopTrackState>) {
+    const tracks = [...this.snap.loops.tracks];
+    const t = tracks[index];
+    if (!t) return;
+    tracks[index] = { ...t, ...patch };
+    this.updateLoops({ tracks });
+  }
+
+  /** Replays the deck's mixer and transport onto a fresh engine. Takes do not survive. */
+  private pushLoops() {
+    const d = this.snap.loops;
+    this.backend.setClockParam("bpm", d.bpm);
+    this.backend.setClockParam("beatsPerBar", d.beatsPerBar);
+    this.backend.setClockParam("quantize", d.quantize);
+    this.backend.setClockParam("run", d.running ? 1 : 0);
+    this.backend.setLooperParam("gain", d.gain);
+    this.backend.setLooperParam("mute", d.mute ? 1 : 0);
+    for (const t of d.tracks) {
+      this.backend.setLoopParam(t.index, "gain", t.gain);
+      this.backend.setLoopParam(t.index, "pan", t.pan);
+      this.backend.setLoopParam(t.index, "mute", t.mute ? 1 : 0);
+      this.backend.setLoopParam(t.index, "solo", t.solo ? 1 : 0);
+      this.backend.setLoopParam(t.index, "sync", t.sync ? 1 : 0);
+      this.backend.setLoopParam(t.index, "source", t.source);
+      this.backend.loopChainCommand(t.index, { op: "clear" });
+      for (const s of t.chain) {
+        this.backend.loopChainCommand(t.index, {
+          op: "add",
+          id: s.id,
+          type: s.type,
+          params: s.params,
+          mix: s.mix,
+          bypassed: s.bypassed,
+        });
+      }
+    }
+    // A restarted engine has empty buffers, so any UI state that described a take is
+    // stale. The meter block reports EMPTY on the next poll and the lanes follow.
+  }
+
+  // --- transport
+
+  /** One punch. EMPTY -> record, REC -> close the loop and play, PLAY -> overdub. */
+  loopRecord(index: number) {
+    this.backend.loopRecord(index);
+  }
+
+  loopPlay(index: number) {
+    this.backend.loopPlay(index);
+  }
+
+  loopStop(index: number) {
+    this.backend.loopStop(index);
+  }
+
+  loopClear(index: number) {
+    this.backend.loopClear(index);
+  }
+
+  loopUndo(index: number) {
+    this.backend.loopUndo(index);
+  }
+
+  loopClearAll() {
+    this.backend.loopClearAll();
+  }
+
+  setBpm(bpm: number) {
+    const v = Math.max(MIN_BPM, Math.min(MAX_BPM, bpm));
+    if (!Number.isFinite(v)) return;
+    this.backend.setClockParam("bpm", v);
+    this.updateLoops({ bpm: v });
+  }
+
+  setBeatsPerBar(beats: number) {
+    const v = Math.max(1, Math.min(16, Math.round(beats)));
+    this.backend.setClockParam("beatsPerBar", v);
+    this.updateLoops({ beatsPerBar: v });
+  }
+
+  /** Quantise grid in beats. 0 turns quantising off — punches land immediately. */
+  setQuantize(beats: number) {
+    this.backend.setClockParam("quantize", beats);
+    this.updateLoops({ quantize: beats });
+  }
+
+  setTransportRun(on: boolean) {
+    this.backend.setClockParam("run", on ? 1 : 0);
+    this.updateLoops({ running: on });
+  }
+
+  resetTransport() {
+    this.backend.setClockParam("reset", 1);
+  }
+
+  // --- deck mixer
+
+  setLooperGain(db: number) {
+    this.backend.setLooperParam("gain", db);
+    this.updateLoops({ gain: db });
+  }
+
+  setLooperMute(mute: boolean) {
+    this.backend.setLooperParam("mute", mute ? 1 : 0);
+    this.updateLoops({ mute });
+  }
+
+  setLoopGain(index: number, db: number) {
+    this.backend.setLoopParam(index, "gain", db);
+    this.updateLoopTrack(index, { gain: db });
+  }
+
+  setLoopPan(index: number, pan: number) {
+    const v = Math.max(-1, Math.min(1, pan));
+    this.backend.setLoopParam(index, "pan", v);
+    this.updateLoopTrack(index, { pan: v });
+  }
+
+  setLoopMute(index: number, mute: boolean) {
+    this.backend.setLoopParam(index, "mute", mute ? 1 : 0);
+    this.updateLoopTrack(index, { mute });
+  }
+
+  /** Per-track solo, not a single-selection radio: soloing two lanes plays both. */
+  setLoopSolo(index: number, solo: boolean) {
+    this.backend.setLoopParam(index, "solo", solo ? 1 : 0);
+    this.updateLoopTrack(index, { solo });
+  }
+
+  setLoopSync(index: number, sync: boolean) {
+    this.backend.setLoopParam(index, "sync", sync ? 1 : 0);
+    this.updateLoopTrack(index, { sync });
+  }
+
+  setLoopSource(index: number, source: number) {
+    this.backend.setLoopParam(index, "source", source);
+    this.updateLoopTrack(index, { source });
+  }
+
+  setLoopName(index: number, name: string) {
+    this.updateLoopTrack(index, { name });
+  }
+
+  /** Waveform for one lane, pulled on demand. Null when the lane is empty. */
+  getLoopPeaks(index: number, buckets = 480): Promise<Float32Array | null> {
+    return this.backend.getLoopPeaks(index, buckets);
+  }
+
+  // --- loop effect chains (same protocol as the pad chains, deliberately)
+
+  addLoopEffect(index: number, type: string, at?: number): number | null {
+    const track = this.snap.loops.tracks[index];
+    if (!track || !EFFECTS[type]) return null;
+    const slot: PadSlotState = {
+      id: this.nextId++,
+      type,
+      params: defaultParams(type),
+      mix: EFFECTS[type].defaultMix,
+      bypassed: false,
+    };
+    const chain = [...track.chain];
+    const pos = at === undefined ? chain.length : Math.max(0, Math.min(at, chain.length));
+    chain.splice(pos, 0, slot);
+    this.backend.loopChainCommand(index, {
+      op: "add",
+      id: slot.id,
+      type,
+      params: slot.params,
+      mix: slot.mix,
+      bypassed: false,
+      index: pos,
+    });
+    this.updateLoopTrack(index, { chain });
+    return slot.id;
+  }
+
+  removeLoopEffect(index: number, id: number) {
+    const track = this.snap.loops.tracks[index];
+    if (!track) return;
+    this.backend.loopChainCommand(index, { op: "remove", id });
+    this.updateLoopTrack(index, { chain: track.chain.filter((s) => s.id !== id) });
+  }
+
+  moveLoopEffect(index: number, id: number, at: number) {
+    const track = this.snap.loops.tracks[index];
+    if (!track) return;
+    const chain = [...track.chain];
+    const from = chain.findIndex((s) => s.id === id);
+    if (from < 0) return;
+    const to = Math.max(0, Math.min(at, chain.length - 1));
+    if (from === to) return;
+    const [s] = chain.splice(from, 1);
+    chain.splice(to, 0, s);
+    this.backend.loopChainCommand(index, { op: "move", id, at: to });
+    this.updateLoopTrack(index, { chain });
+  }
+
+  setLoopEffectParam(index: number, id: number, key: string, value: number) {
+    const track = this.snap.loops.tracks[index];
+    if (!track) return;
+    const i = track.chain.findIndex((s) => s.id === id);
+    if (i < 0 || track.chain[i].params[key] === value) return;
+    this.backend.setLoopChainParam(index, id, track.chain[i].type, key, value);
+    const chain = [...track.chain];
+    chain[i] = { ...chain[i], params: { ...chain[i].params, [key]: value } };
+    this.updateLoopTrack(index, { chain });
+  }
+
+  setLoopEffectMix(index: number, id: number, value: number) {
+    const track = this.snap.loops.tracks[index];
+    if (!track) return;
+    const i = track.chain.findIndex((s) => s.id === id);
+    if (i < 0) return;
+    this.backend.loopChainCommand(index, { op: "mix", id, value });
+    const chain = [...track.chain];
+    chain[i] = { ...chain[i], mix: value };
+    this.updateLoopTrack(index, { chain });
+  }
+
+  setLoopEffectBypass(index: number, id: number, bypassed: boolean) {
+    const track = this.snap.loops.tracks[index];
+    if (!track) return;
+    const i = track.chain.findIndex((s) => s.id === id);
+    if (i < 0) return;
+    this.backend.loopChainCommand(index, { op: "bypass", id, value: bypassed ? 1 : 0 });
+    const chain = [...track.chain];
+    chain[i] = { ...chain[i], bypassed };
+    this.updateLoopTrack(index, { chain });
+  }
+
+  clearLoopChain(index: number) {
+    if (!this.snap.loops.tracks[index]) return;
+    this.backend.loopChainCommand(index, { op: "clear" });
+    this.updateLoopTrack(index, { chain: [] });
+  }
+
+  // --- kit documents
+
+  exportKit(): KitDocument {
+    return exportKitDoc(this.snap.kit);
+  }
+
+  /** Replaces the whole kit, then replays it onto the engine. */
+  async loadKit(doc: Partial<KitDocument>): Promise<void> {
+    const kit = importKit(doc);
+    for (const p of kit.pads) {
+      for (const s of p.chain) this.nextId = Math.max(this.nextId, s.id + 1);
+    }
+    this.snap = { ...this.snap, kit: { ...kit, ready: true } };
+    saveKitDoc(exportKitDoc(kit));
+    this.emit();
+    await this.pushKit();
+    this.emit();
+  }
+
+  /** Back to the stock sixteen pads. */
+  async resetKit(): Promise<void> {
+    this.backend.resetDrums();
+    const kit = applyDefaultLayout(emptyKit());
+    this.snap = { ...this.snap, kit: { ...kit, ready: true } };
+    saveKitDoc(exportKitDoc(kit));
+    this.emit();
+    await this.pushKit();
+    this.emit();
+  }
+
   // ---------------------------------------------------------------- presets
 
   /** Serialise the full signal chain — every module, every parameter, plus the I/O stage. */
@@ -594,7 +1596,10 @@ export class EngineClient {
   }
 
   pollScope(frames = 1024): boolean {
-    return this.backend.readScope(this.scope, frames);
+    const got = this.backend.readScope(this.scope, frames);
+    // Record the filled window so consumers never draw the untouched tail.
+    this.scope.frames = got ? Math.min(frames, this.scope.input.length) : 0;
+    return got;
   }
 
   readSpectrum(out: Float32Array): boolean {
@@ -664,6 +1669,24 @@ function saveChain(c: ChainSnapshot) {
     localStorage.setItem(CHAIN_KEY, JSON.stringify(c));
   } catch {
     // ignore
+  }
+}
+
+function saveKitDoc(doc: KitDocument) {
+  try {
+    localStorage.setItem(KIT_KEY, JSON.stringify(doc));
+  } catch {
+    // ignore
+  }
+}
+
+function loadKitDoc(): Partial<KitDocument> | null {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(KIT_KEY);
+    return raw ? (JSON.parse(raw) as Partial<KitDocument>) : null;
+  } catch {
+    return null;
   }
 }
 

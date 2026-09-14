@@ -171,6 +171,12 @@ export function TopBar() {
         </Segment>
       )}
 
+      {info && !info.inputActive && (
+        <Segment title={info.inputError ?? "The engine is running without a microphone."}>
+          <span style={{ color: "var(--vk-amber)" }}>NO INPUT</span>
+        </Segment>
+      )}
+
       {info && !info.sharedMemory && (
         <Segment title="SharedArrayBuffer is unavailable so the engine fell back to postMessage transport. Parameters still apply; scope and capture are degraded.">
           <span style={{ color: "var(--vk-amber)" }}>NO SAB</span>

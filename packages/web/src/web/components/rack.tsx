@@ -22,7 +22,8 @@ import {
 } from "../audio/param-schema";
 import type { SlotState } from "../audio/engine-client";
 
-const CATEGORY_COLOR: Record<EffectCategory, string> = {
+/** Shared with the BROBEATS pad editor so a pad's effect chain colour-codes identically. */
+export const CATEGORY_COLOR: Record<EffectCategory, string> = {
   tone: "#35d6d0",
   dynamics: "#4ade80",
   drive: "#ff6b2c",
@@ -371,21 +372,13 @@ function RackModule({
 
 /* ------------------------------------------------------------ metal vocoder */
 
-/** Four corner bolts. Even/odd alternates the slot angle — see .mk-screw. */
-function ScrewRow() {
-  return (
-    <>
-      {/* Position comes from the inline style, NOT a Tailwind `absolute` class: `.mk-screw`
-          declares `position: relative` for its slot pseudo-element, and since both are
-          single-class selectors the later stylesheet won - which collapsed all four bolts
-          into the flow at the top-left corner. An inline style outranks both. */}
-      <span className="mk-screw" style={{ position: "absolute", top: 7, left: 7 }} />
-      <span className="mk-screw" style={{ position: "absolute", top: 7, right: 7 }} />
-      <span className="mk-screw" style={{ position: "absolute", bottom: 7, left: 7 }} />
-      <span className="mk-screw" style={{ position: "absolute", bottom: 7, right: 7 }} />
-    </>
-  );
-}
+/* The four-corner-bolt `ScrewRow` that used to live here is gone: the reference this
+   metal skin is drawn from is a moulded unit with no visible fixings, so nothing rendered
+   it. The `.mk-screw` rules stay in styles.css for a future bolted panel — if you bring
+   them back, position the bolts with an inline style rather than Tailwind's `absolute`:
+   `.mk-screw` declares `position: relative` for its slot pseudo-element and, both being
+   single-class selectors, the later stylesheet wins and collapses all four into the flow
+   at the top-left corner. */
 
 /**
  * The VOCODER module dressed in the metal skin from the product renders:
@@ -476,7 +469,7 @@ function MetalVocoderModule({
         onDrop();
       }}
     >
-      {/* No ScrewRow: the gradient reference is a moulded unit with no visible fixings. */}
+      {/* No `.mk-screw` bolts here: the gradient reference is a moulded unit with no visible fixings. */}
       <div className="mk-face relative flex min-h-0 flex-1 flex-col overflow-hidden">
 
         {/* Same category-coloured tone bar every other module wears. The engraved nameplate

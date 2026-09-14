@@ -17,10 +17,28 @@ import { ScopeStrip } from "../components/meters";
 import { MidiPanel } from "../components/midi-panel";
 import { PresetBrowser } from "../components/preset-browser";
 import { Rack } from "../components/rack";
+import { PadGrid } from "../components/brobeats/pad-grid";
+import { PadEditor } from "../components/brobeats/pad-editor";
+import { SampleEditor } from "../components/brobeats/sample-editor";
+import { KitBrowser } from "../components/brobeats/kit-browser";
+import { LoopDeck } from "../components/brobeats/loop-deck";
+import { SmartVoicePanel } from "../components/brobeats/smart-voice-panel";
 import { RecorderPanel } from "../components/recorder-panel";
 import { TopBar } from "../components/topbar";
 
 type ScopeMode = "vu" | "spectrum";
+
+/** Centre-pane workspaces. The rest of the window (analyser, rails, I/O) is shared. */
+type Workspace = "rack" | "brobeats" | "loops";
+
+/**
+ * The BROBEATS right-hand column carries four views against the same pad grid: the pad's
+ * own voice, the sample bench that feeds it, the library of saved kits, and Smart Voice —
+ * the beatbox detector that plays the same pads with your mouth. They are tabbed rather
+ * than stacked because each is tall, and you are only ever doing one of them at a time —
+ * cut a sound, send it to a pad, shape the pad, calibrate, save the kit.
+ */
+type BeatsTab = "pad" | "sample" | "kits" | "voice";
 
 /**
  * Left-rail colour coding. One hue per panel so the eye finds a panel by colour before it
@@ -107,6 +125,9 @@ function Index() {
   const client = useEngine();
   const { slots, io, status } = useEngineState();
   const [scopeMode, setScopeMode] = useState<ScopeMode>("vu");
+  const [workspace, setWorkspace] = useState<Workspace>("rack");
+  const [selectedPad, setSelectedPad] = useState(0);
+  const [beatsTab, setBeatsTab] = useState<BeatsTab>("pad");
   const [history, setHistory] = useState<{ past: string[]; future: string[] }>({ past: [], future: [] });
 
   // Load a starting chain the first time the app is opened so the rack is never empty.
@@ -155,12 +176,16 @@ function Index() {
     "mod+z": undo,
     "mod+y": redo,
     "mod+shift+z": redo,
-    ...Object.fromEntries(
-      FACTORY_PRESETS.slice(0, 9).map((p, i) => [
-        String(i + 1),
-        () => client.loadChain(p.chain, p.id),
-      ]),
-    ),
+    // Number keys are preset recall in the rack — but they are the top pad row in
+    // BROBEATS, and a keystroke cannot mean both. The visible workspace wins.
+    ...(workspace === "rack"
+      ? Object.fromEntries(
+          FACTORY_PRESETS.slice(0, 9).map((p, i) => [
+            String(i + 1),
+            () => client.loadChain(p.chain, p.id),
+          ]),
+        )
+      : {}),
   });
 
   return (
@@ -192,7 +217,8 @@ function Index() {
                 ["B", "Master bypass"],
                 ["M", "Mute output"],
                 ["Esc", "Panic"],
-                ["1–9", "Load factory preset"],
+                ["1–9", "Load factory preset (RACK)"],
+                ["Z X C V …", "Play pads (BROBEATS)"],
                 ["Ctrl+Z", "Undo"],
                 ["Ctrl+Y", "Redo"],
                 ["Shift+drag", "Fine knob adjust"],
@@ -246,8 +272,113 @@ function Index() {
             </div>
           </div>
 
+          {/* workspace switch */}
+          <div className="flex shrink-0 items-center gap-2">
+            {(
+              [
+                { id: "rack", label: "RACK", hint: "The effect chain your voice runs through" },
+                { id: "brobeats", label: "BROBEATS", hint: "Sixteen-pad drum rack — play it, sculpt it, drop samples on it" },
+                { id: "loops", label: "LOOPS", hint: "Four loop lanes and the transport — record over yourself in time" },
+              ] as const
+            ).map((v) => (
+              <button
+                key={v.id}
+                className="vk-btn vk-focus-ring"
+                data-active={workspace === v.id}
+                style={{ fontSize: 10, padding: "3px 10px" }}
+                onClick={() => setWorkspace(v.id)}
+                title={v.hint}
+              >
+                {v.label}
+              </button>
+            ))}
+            <span className="vk-label" style={{ color: "var(--vk-text-dim)" }}>
+              {workspace === "rack"
+                ? "signal flows left to right — drag modules to reorder"
+                : workspace === "loops"
+                  ? "REC punches on the quantise grid · a second punch closes the loop · a third overdubs"
+                  : "hit a pad to select and play it · drop an audio file on a pad to load it"}
+            </span>
+          </div>
+
           <div className="min-h-0 flex-1 overflow-hidden">
-            <Rack />
+            {workspace === "rack" ? (
+              <Rack />
+            ) : workspace === "loops" ? (
+              <LoopDeck />
+            ) : (
+              // Side by side once the centre column can carry both (the editor needs
+              // ~420px before its knob rows start wrapping into unreadable slivers);
+              // stacked below that, grid first, with the whole thing scrolling as one.
+              <div className="flex h-full min-h-0 flex-col gap-2 overflow-y-auto xl:flex-row xl:overflow-hidden">
+                <div className="vk-panel shrink-0 p-2 xl:overflow-y-auto" style={{ width: "100%", maxWidth: 372 }}>
+                  <PadGrid selected={selectedPad} onSelect={setSelectedPad} />
+                </div>
+                <div className="flex min-w-0 shrink-0 flex-col gap-2 xl:shrink xl:flex-1 xl:overflow-y-auto">
+                  <div className="flex shrink-0 items-center gap-2">
+                    {(
+                      [
+                        { id: "pad", label: "PAD", hint: "The selected pad's source, envelope, voice and effects" },
+                        { id: "sample", label: "SAMPLE", hint: "Record or import audio, cut it, and send it to a pad" },
+                        { id: "kits", label: "KITS", hint: "Save the whole sixteen-pad kit under a name, and load it back" },
+                        { id: "voice", label: "VOICE", hint: "Smart Voice — beatbox into the mic and it plays the pads" },
+                      ] as const
+                    ).map((t) => (
+                      <button
+                        key={t.id}
+                        className="vk-btn vk-focus-ring"
+                        data-active={beatsTab === t.id}
+                        style={{ fontSize: 9, padding: "2px 10px" }}
+                        onClick={() => setBeatsTab(t.id)}
+                        title={t.hint}
+                      >
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
+                  {/*
+                    Both panels stay mounted and the inactive one is hidden, rather than
+                    swapping one for the other. The sample editor holds the only copy of a
+                    capture you have not sent anywhere yet — unmounting it on a tab change
+                    would throw away the take, the trim and the slices the moment you looked
+                    at the pad you just filled. `active` is what tells it to stop painting
+                    and stop auditioning while it is out of sight.
+                  */}
+                  <div className={beatsTab === "pad" ? "contents" : "hidden"}>
+                    <PadEditor index={selectedPad} />
+                  </div>
+                  <div className={beatsTab === "sample" ? "contents" : "hidden"}>
+                    <SampleEditor
+                      active={beatsTab === "sample"}
+                      onSelectPad={(i, focus) => {
+                        // Sending a sample to a pad selects it, so the grid is already
+                        // pointing at the thing you just made. Only a single deliberate
+                        // send pulls the pad editor forward with it.
+                        setSelectedPad(i);
+                        if (focus) setBeatsTab("pad");
+                      }}
+                    />
+                  </div>
+                  {/*
+                    Mounted alongside the other two for the same reason, and because the
+                    kit list is a query — keeping it mounted means switching to this tab
+                    shows the library immediately instead of a loading flash every time.
+                  */}
+                  <div className={beatsTab === "kits" ? "contents" : "hidden"}>
+                    <KitBrowser />
+                  </div>
+                  {/*
+                    Mounted with the rest, and `active` matters more here than anywhere:
+                    a calibration pass leaves the detector's capture armed, which
+                    suppresses pad firing. Looking away mid-pass has to disarm it, or
+                    Smart Voice reads as broken for the rest of the session.
+                  */}
+                  <div className={beatsTab === "voice" ? "contents" : "hidden"}>
+                    <SmartVoicePanel active={beatsTab === "voice"} />
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           <RecorderPanel />

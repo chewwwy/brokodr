@@ -487,7 +487,8 @@ result meaningless. Both halves are fixed:
    **Note the tension with the libm caveat below**: a baseline drop is not automatically a
    bug, it is always something to read before re-baselining, and the reason must go in the
    commit. Baselines pinned today: `utils` 84/85/96, `delay-line` 265/267/267, `fft`
-   221/221/221 (native-vs-JS / wasm-vs-JS / native-vs-wasm), `chain` 21/21/21.
+   221/221/221 (native-vs-JS / wasm-vs-JS / native-vs-wasm), `chain` 21/21/21,
+   `drum-voice` 39/42/40 of 43.
 
 4. **The chain cannot recognise its own quality param (design defect in the port, fixed).**
    `chain.js` recalculates the chain's latency when a `setParam` key equals the string
@@ -528,6 +529,38 @@ rather than as holes — two wrote to slots the length change immediately puts o
 one returned early from the hit path and so still fell through to the recalc it meant to
 remove. Reading an escape is as much work as reading a failure.
 
+`drum-voice` is the first module with libm in the audio path — `cos`/`sin` for the pan
+law, `exp` for the envelope coefficients, `pow` for the pitch ratio — and so the first
+where full bit-identity is not the expected result. 39 of 43 scripts match the JS bit for
+bit natively, 42 under emcc, 40 across the two toolchains; the four that do not are the
+`exp`-driven release case and the three that park the pan at 0.4, and they are pinned
+per-case with the reason next to the number rather than absorbed into a tolerance. This is
+the shape every later module with a transcendental in it will have, and the baseline is
+what makes a *new* divergence visible against it.
+
+Its mutation run is also the largest so far, and the most instructive: 94 mutants, 11 of
+which escaped the first battery. Nine were genuine holes, every one of them an edge the
+36-script battery simply never visited — a NaN arriving as `y0` of the linear pair rather
+than anywhere else, a sub-frame attack whose increment needs flooring to 1, a `setBuffer`
+index past the last layer, `release()` called on a voice already idle, a layer holding a
+live pointer and zero frames, a choke fade that lands on exactly 0.0, a sustain knob
+dropped under a note already holding, and the two exclusive-vs-inclusive `>= 0.5` param
+thresholds. Seven new scripts and two extended ones close all nine. The other two escapes
+were equivalent mutants and are documented as such **in `drum-voice.c` itself**, next to
+the code that makes them equivalent, so the next reader does not re-derive the argument:
+the attack-zero ternary is floored to the same answer either way, and the outer
+out-of-range band is a cheap gate in front of the cubic branch's own bound, which is the
+guard that actually holds. Both were replaced in the mutation set with non-equivalent
+mutants on the same expressions, which are caught.
+
+And the `chain` lesson repeated exactly: two of the nine new checks were wrong about a
+correct port. Both were about when the pan smoother runs, which turns out to be worth
+stating plainly — a voice that ends mid-block advances its smoothers only for the frames
+it actually rendered, while a block that finds the voice already inactive runs them for
+its whole length on purpose, so the next hit starts settled. The standstill across the
+ending block is the only observable difference between `env <= 0` and `env < 0` in the
+choke fade, because the extra frame a `< 0` test admits carries env 0 and is silent.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -536,7 +569,8 @@ remove. Reading an escape is as much work as reading a failure.
   - Module order is by risk, not size: `utils` (done, 23 checks green) → `biquad` (done,
     19 checks green) → `delay-line` (done, 30 checks green, 6/6 mutants caught) → `fft`
     (done, 52 checks green, 8/8 mutants caught) → `chain` (done, 91 checks green, 29/29
-    mutants caught) → `drum-*`, `onset`, `beat-classify` → **`looper.js` last**, being the
+    mutants caught) → `drum-voice` (done, 142 checks green, 94/94 mutants caught) →
+    `drum-rack`, `drum-synth`, `onset`, `beat-classify` → **`looper.js` last**, being the
     largest (925 lines) and most stateful.
   - Each module gets its own parity battery, and each battery is itself mutation-tested
     before it is believed. Shared plumbing lives in `packages/native/tests/parity-io.h`

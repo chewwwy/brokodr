@@ -55,15 +55,23 @@
 #define BK_CHAIN_KEEP (-1)                /* "not specified" for bypassed */
 
 /*
- * The param key the chain itself reacts to.
+ * Why there is no quality key here.
  *
- * chain.js compares against the string "quality" because oversampling quality
- * changes the latency a module reports. The hot path here is numeric — which is
- * what Slot.paramNames in the JS exists to enable — so the host maps names to
- * indices once, off the audio thread, and this is the reserved index for that
- * one key. Any other key is passed straight through to the effect.
+ * chain.js's setParam compares its key against the string "quality", because
+ * oversampling quality changes the latency a module reports, and recalculates
+ * the chain's latency when it matches. The hot path here is numeric, and a
+ * numeric key alone cannot answer that question: the key on the wire is the
+ * param's *index within its own effect type's* param list (param-schema.ts,
+ * which is why that file forbids reordering), so "quality" sits at a different
+ * index for every type that has one — index 5 on `pitch`, and nowhere at all
+ * on the rest. A reserved constant would recalculate on whatever param
+ * happened to land on that index instead.
+ *
+ * So the chain does not interpret keys. The host resolves the name once, off
+ * the audio thread, and calls bk_chain_recalc_latency() itself after a quality
+ * change — which is exactly what worklet-processor.js already does on the live
+ * path, having the slot's paramNames in hand. Same behaviour, one owner.
  */
-#define BK_PARAM_QUALITY 0
 
 /*
  * What the chain needs of an effect, and nothing more.
@@ -73,7 +81,9 @@
  *
  *   process          required. Renders 100% wet, in place, over `frames`.
  *   reset            required. Drops state; called on bypass and on panic.
- *   set_param        optional. Numeric key, as above.
+ *   set_param        optional. The key is the param's index within its own
+ *                    effect type's param list; the effect's own switch owns
+ *                    what each index means, and the chain never reads it.
  *   set_carrier_bus  optional. Effects driven by an external signal (talk box,
  *                    vocoder) get the chain's carrier bus once, at add time,
  *                    so the render loop does no lookup.
@@ -163,6 +173,8 @@ bk_slot *bk_chain_add(bk_chain *c, const bk_slot_spec *spec);
 
 void bk_chain_remove(bk_chain *c, int id);
 void bk_chain_move(bk_chain *c, int id, int index);
+/* Hands the param to the effect and nothing more — no latency recalculation.
+   See the note above: the caller owns that, because only it knows the names. */
 void bk_chain_set_param(bk_chain *c, int id, int key, double value);
 void bk_chain_set_mix(bk_chain *c, int id, double value);
 void bk_chain_set_bypass(bk_chain *c, int id, int value);

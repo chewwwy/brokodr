@@ -334,7 +334,14 @@ static int run_script(FILE *f, const char *name, const double *ops, int n_ops, i
         bk_chain_move(&c, (int)a, (int)b);
         break;
       case OP_PARAM:
+        /* The harness stands in for the host here, and the host is what owns
+           the quality decision now (see chain.h). PK_QUALITY is this test
+           effect's own index for it; the real host reads the name out of the
+           slot's param table. Deliberately outside any "does the slot exist"
+           test, because the name is known either way — which is what keeps
+           chain.js's recalc-on-a-miss behaviour intact end to end. */
         bk_chain_set_param(&c, (int)a, (int)b, cc);
+        if ((int)b == PK_QUALITY) bk_chain_recalc_latency(&c);
         break;
       case OP_MIX:
         bk_chain_set_mix(&c, (int)a, b);

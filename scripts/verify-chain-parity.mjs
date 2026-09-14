@@ -31,11 +31,19 @@
  *     silently matched nothing would leave this file testing a copy of the
  *     original registry instead of the chain.
  *
- * On param keys: Chain.setParam takes a string, because engine.js hands it
- * one; bk_chain_set_param takes a canonical int, because the audio thread
- * should not compare strings. PARAM_KEYS is that mapping, and it is the
- * contract the port assumes the host performs — the worklet already keeps the
- * equivalent table as slot.paramNames.
+ * On param keys: Chain.setParam takes a string, because engine.js hands it one;
+ * bk_chain_set_param takes the int the wire carries. PARAM_KEYS is the test
+ * effect's own name/index table, standing in for the per-type table
+ * param-schema.ts generates and the worklet already carries as
+ * slot.paramNames.
+ *
+ * The int is a *per-effect-type* index, so the chain cannot recognise "quality"
+ * from it and no longer tries: bk_chain_set_param does not recalculate latency,
+ * and the caller does. Both sides of this comparison therefore play host —
+ * run_script() in the C and runScript() here each recalculate after a quality
+ * key, unconditionally, which is what keeps chain.js's recalc-on-a-miss
+ * behaviour reproduced rather than quietly dropped. chain.js still does it
+ * internally, so the JS side must not do it twice.
  */
 
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -289,6 +297,10 @@ function runScript(rec) {
         chain.move(a, b);
         break;
       case OP.PARAM:
+        // chain.js compares the string itself and recalculates internally, so
+        // the host's recalc is already covered on this side. Calling
+        // recalcLatency() again here would be harmless (it is idempotent) but
+        // would stop this line from testing that the JS does it at all.
         chain.setParam(a, PARAM_KEYS[b], c);
         break;
       case OP.MIX:
@@ -840,7 +852,19 @@ function channels(name) {
   const unused = Object.entries(OP).filter(([, v]) => !seen.has(v)).map(([k]) => k);
   ok("every opcode is exercised", unused.length === 0, unused.length ? `unused: ${unused}` : `${seen.size} opcodes`);
   ok("the battery renders a meaningful amount of audio", frames > 2000, `${frames} frames`);
-  ok("the param key table lines up with BK_PARAM_QUALITY", PARAM_KEYS[PK_QUALITY] === "quality");
+  ok("the test effect's key table agrees with the C's", PARAM_KEYS[PK_QUALITY] === "quality" && PARAM_KEYS.length === 5);
+  // The chain must not react to a key on its own — that is the whole point of
+  // moving the quality decision to the host. A quality key that the host does
+  // NOT follow up on has to leave the total stale, and this proves the chain
+  // is not secretly recalculating behind it.
+  {
+    const ch = new js.Chain(SR, MAX_BLOCK, {});
+    ch.add({ id: 1, type: 1, paramNames: PARAM_KEYS });
+    const started = ch.latencySamples;
+    ch.setParam(1, "latency", 96); // not "quality": no recalc, total goes stale
+    ok("a non-quality param never recalculates on its own", ch.latencySamples === started, `${started} -> ${ch.latencySamples}`);
+    ok("and the recalc it skipped was a real one", ch.recalcLatency() !== started, `now ${ch.latencySamples}`);
+  }
 }
 
 console.log(`\n${state.checks} checks, ${state.failures} failed`);

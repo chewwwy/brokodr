@@ -154,9 +154,16 @@ void bk_chain_move(bk_chain *c, int id, int index) {
 void bk_chain_set_param(bk_chain *c, int id, int key, double value) {
   bk_slot *s = bk_chain_find(c, id);
   if (s && s->vt->set_param) s->vt->set_param(s->effect, key, value);
-  /* Outside the `if (s)`, exactly as the JS has it: a quality change addressed
-     to a slot that is not there still recalculates the chain's latency. */
-  if (key == BK_PARAM_QUALITY) bk_chain_recalc_latency(c);
+  /* No latency recalculation here, unlike chain.js. A numeric key cannot tell
+     us whether this was "quality" — the key is the param's index inside its own
+     effect type's list, so the index differs per type. The host knows the name
+     and calls bk_chain_recalc_latency() itself; see the note in chain.h.
+
+     The JS's recalc also sits *outside* its `if (s)`, so a quality change
+     addressed to a slot that is not there still recalculates. A host that
+     keys off the name keeps that: it has the name whether or not the slot
+     exists. */
+  (void)key;
 }
 
 void bk_chain_set_mix(bk_chain *c, int id, double value) {

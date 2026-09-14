@@ -44,11 +44,20 @@ Run it in that order. `bun run dist` re-runs the copy step itself, but it needs
 `bun run dist` produces `Bro.Kodr-Windows-<version>-Setup.exe` (NSIS installer, x64 +
 ia32) plus a portable build. Configuration lives in `packages/desktop/electron-builder.json5`.
 
-Two caveats, stated plainly:
+Caveats, stated plainly:
 
-- **The installer must be produced on Windows.** electron-builder cannot cross-compile a
-  Windows installer from Linux without Wine, and a code-signed one not at all. This repo
-  builds and runs on Linux; the `.exe` step was configured but not executed here.
+- **An unsigned installer builds fine on Linux.** Earlier notes here said the `.exe` step
+  had to happen on Windows; that was wrong for the unsigned case. `wine` + `wine64` from
+  apt is enough (`sudo dpkg --add-architecture i386 && sudo apt-get install wine wine64`),
+  and electron-builder brings its own NSIS. The x64 installer in `release/<version>/` was
+  produced on Debian this way.
+- **A code-signed installer still requires Windows** (or a signing setup electron-builder
+  can drive), so SmartScreen will warn on first run of the unsigned build:
+  "Windows protected your PC" → More info → Run anyway.
+- **Packaging does not reduce input latency.** The desktop build runs the same AudioWorklet
+  backend as the web app; there is no ASIO/WASAPI-exclusive path in this build (see
+  "Latency" below). What the desktop build buys you is direct device selection without
+  browser permission prompts, not a smaller buffer.
 - Set `protocols[0].schemes` to your real `runable-<applicationId>` before packaging, or
   deep links and desktop sign-in will not work in the packaged build (dev builds register
   the protocol at runtime).
@@ -211,7 +220,8 @@ droned through silence.
 - **The native backend is not compiled.** `native-backend.ts` defines the interface and
   IPC protocol for a WASAPI exclusive-mode / ASIO host process; building it needs MSVC on
   Windows. The app runs on the AudioWorklet backend and says so in the device panel.
-- **No `.exe` is included** — see the build section above.
+- **The bundled `.exe` is unsigned** — built on Linux via Wine, so Windows SmartScreen
+  warns on first run. See the build section above.
 - **Not a plugin.** Bro.Kodr is a standalone app, not VST/AU/AAX.
 - Real-time time-stretch is not offered because it is not physically possible; pitch
   shifting is, and is implemented properly.

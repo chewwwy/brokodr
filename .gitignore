@@ -67,15 +67,30 @@ yarn-error.*
 ios
 android
 
-# scripts (local-only provisioning)
-scripts/
+# scripts. Ignore the *contents* by default, not the directory itself: git never
+# descends into an excluded directory, so a `!scripts/verify-*` negation under a
+# bare `scripts/` rule is silently never evaluated. That bug kept the entire
+# verification suite — verify-dsp.mjs included — out of the repo.
+scripts/*
 !packages/mobile/scripts/
 packages/mobile/scripts/*
 !packages/mobile/scripts/generate-ios-certs.py
 
-# ...but the DSP verification suite is part of the product, not local provisioning:
-# the GitHub Actions build runs it, so it has to be in the repo.
-!scripts/verify-dsp.mjs
+# The verification suite is part of the product, not local provisioning: CI runs it, and
+# a check that exists only on one machine is not a check. Every verify-*/measure-* script
+# ships. Anything else dropped into scripts/ stays local by default, which is the only
+# part of the original intent worth keeping.
+!scripts/verify-*.mjs
+!scripts/verify-*.ts
+!scripts/verify-*.sh
+!scripts/measure-*.mjs
+
+# Shared helpers the verify scripts import (the parity stream reader, etc). Same
+# two-line shape as above and for the same reason: the directory must be
+# un-ignored before any negation inside it is even looked at.
+!scripts/lib/
+scripts/lib/*
+!scripts/lib/*.mjs
 
 # ...and the desktop package's build step imports this one, so it must ship too.
 !packages/desktop/scripts/
@@ -85,3 +100,7 @@ packages/desktop/scripts/*
 # Built web assets copied into the desktop package at build time (see
 # packages/desktop/scripts/copy-web-dist.mjs) — generated, never edited by hand.
 web-dist
+
+# Native core build output (Phase 5a). Compiled binaries and sanitizer builds; the
+# sources in packages/native/{include,src,tests} are the product.
+packages/native/build/

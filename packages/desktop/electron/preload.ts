@@ -22,7 +22,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("fs:write", path, data),
   writeBinaryFile: (path: string, data: ArrayBuffer) =>
     ipcRenderer.invoke("fs:writeBinary", path, data),
+  readBinaryFile: (path: string) => ipcRenderer.invoke("fs:readBinary", path),
+  deleteFile: (path: string) => ipcRenderer.invoke("fs:delete", path),
   recordingsDir: () => ipcRenderer.invoke("fs:recordingsDir"),
+  samplesDir: () => ipcRenderer.invoke("fs:samplesDir"),
   showItemInFolder: (path: string) =>
     ipcRenderer.invoke("shell:showItemInFolder", path),
 

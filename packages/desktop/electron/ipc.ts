@@ -40,9 +40,39 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null) {
     return filePath;
   });
 
+  /**
+   * Binary read — the inverse of the above, and what restores a kit's pad audio on
+   * launch. Returns the bytes themselves rather than a path: BROBEATS samples are
+   * one-shots of a few hundred kilobytes, and handing back an ArrayBuffer means the
+   * renderer can decode straight into the voice with no AudioContext and no fetch().
+   */
+  ipcMain.handle("fs:readBinary", async (_, filePath: string) => {
+    const buf = await fs.readFile(filePath);
+    // Slice to the exact view: Node pools small Buffers, so handing over `buf.buffer`
+    // raw would ship the whole pool — other files' bytes included — across IPC.
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  });
+
+  ipcMain.handle("fs:delete", async (_, filePath: string) => {
+    await fs.rm(filePath, { force: true });
+  });
+
   /** Default place to drop recordings: the OS Music folder, created if missing. */
   ipcMain.handle("fs:recordingsDir", async () => {
     const dir = path.join(app.getPath("music"), "Bro.Kodr");
+    await fs.mkdir(dir, { recursive: true });
+    return dir;
+  });
+
+  /**
+   * The sample library: a Samples folder beside the recordings, created if missing.
+   *
+   * Under Music/Bro.Kodr rather than in appData on purpose — these are the user's
+   * sounds. They should be visible, backed up with the rest of their music, and still
+   * there after a reinstall, which is not true of anything in a profile directory.
+   */
+  ipcMain.handle("fs:samplesDir", async () => {
+    const dir = path.join(app.getPath("music"), "Bro.Kodr", "Samples");
     await fs.mkdir(dir, { recursive: true });
     return dir;
   });

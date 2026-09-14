@@ -85,6 +85,12 @@ packages/mobile/scripts/*
 !scripts/verify-*.sh
 !scripts/measure-*.mjs
 
+# Code generators ship for the same reason: their output is committed, and the
+# only thing keeping that output honest is CI re-running the generator with
+# --check. A generator that exists on one machine is a stale header waiting to
+# happen.
+!scripts/gen-*.mjs
+
 # Shared helpers the verify scripts import (the parity stream reader, etc). Same
 # two-line shape as above and for the same reason: the directory must be
 # un-ignored before any negation inside it is even looked at.

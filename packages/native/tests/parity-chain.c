@@ -104,10 +104,11 @@ enum {
   OP_SNAP = 12
 };
 
-/* Canonical param ids the VM addresses. 0 is BK_PARAM_QUALITY, the one the
-   chain itself reacts to; 3 also moves the reported latency but is NOT the
-   quality key, which is how the battery manufactures a stale latency for the
-   recalc-on-a-miss quirk to then correct. */
+/* Param ids the VM addresses, in this test effect's own numbering — the chain
+   interprets none of them (see chain.h). PK_QUALITY is the one the *harness*
+   treats as quality, playing the host's role; PK_LATENCY also moves the
+   reported latency but is not the quality key, which is how the battery
+   manufactures a stale latency for the recalc-on-a-miss quirk to correct. */
 enum { PK_QUALITY = 0, PK_GAIN = 1, PK_CARRIER = 2, PK_LATENCY = 3, PK_INERT = 4 };
 
 static double sig_l[SIG_LEN];

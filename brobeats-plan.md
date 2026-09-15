@@ -374,6 +374,12 @@ front rather than discovered at the end.
     currently-working web build on new code, so the switch only happens once `verify-dsp`
     passes against the wasm build — the existing suite becomes the parity oracle.
   - **DECIDED: route (c).** Chosen after the spike below, not before it.
+  - **Amended 2026-09-15, six modules in:** route (c) stands — one C source of truth, and
+    the wasm build is how the demo runs it. What's dropped is the part of (c) that treated
+    *web/native bit-identity as a shipping gate*. The desktop `.exe` is the product; the
+    browser build is a demo. So the `.js` is the porting reference and the divergence is
+    measured, but agreement with V8 no longer blocks a module from being done. See "What
+    (c) means for the remaining port" for what this changes module by module.
 
 #### The (c) spike — done, and it came back stronger than expected
 
@@ -639,17 +645,68 @@ rather than accepted:
     `drum-rack` (done, 224 checks green, 123/123 mutants caught) → `drum-synth`, `onset`,
     `beat-classify` → **`looper.js` last**, being the largest (925 lines) and most
     stateful.
+  - **`drum-synth` (next) is the first module deliberately ported without a JS-parity
+    gate, and reading it is what forced the question.** 321 lines, six renderers, and it
+    never touches the audio thread — it runs at kit-build time and when a knob moves in
+    the kit editor, rendering up to 4 seconds into a buffer in one call. That is what
+    "offline" means here: off the audio thread, in both builds, not "the exe only". It is
+    also the only module so far where sample-level agreement with V8 is **not achievable
+    at any tolerance worth asserting**, for two structural reasons:
+
+      - **Peak normalisation is global.** `renderDrum` scans the finished render for its
+        peak, then scales every sample by `0.89 / peak`. One ULP of divergence that lands
+        on the peak sample changes the gain applied to the *entire* buffer. A local
+        difference becomes a global one.
+      - **The hat renderer puts a comparator on a transcendental**: `m += Math.sin(ph[k])
+        >= 0 ? 1 : -1`, six inharmonic partials summed as square waves. One ULP in `sin`
+        near a zero crossing doesn't shift a sample slightly, it flips ±1 — a ~30%
+        instantaneous step. Across ~260k comparisons in a 900 ms ride, near-crossings are
+        a certainty, not a risk.
+
+    So its battery is built on **self-consistency and behaviour** instead: the same build
+    renders the same kit byte-for-byte against its own pinned baseline (which still
+    catches every real regression), each of the six kinds lands in its expected band on
+    peak / RMS envelope / decay length / spectral centroid, no NaN and no clipping
+    survives `sanitize`, the 2 ms fade-out actually reaches zero, the xorshift noise is
+    deterministic per seed, and all 16 `DEFAULT_KIT_LAYOUT` entries render. Mutation
+    tested like everything else. `cc`-vs-`emcc` divergence gets measured and recorded
+    because it costs nothing and makes a useful canary — it just isn't a gate.
+
+    **Watch for the libm constant-folding trap here specifically:** LLVM folds `cos`/
+    `sin`/`pow` on literal arguments using the *host's* libm at compile time, which makes
+    `cc` and `emcc` appear to agree when they don't. Any micro-benchmark comparing the two
+    must take its input through a `volatile`. This module is full of exactly those calls.
   - Each module gets its own parity battery, and each battery is itself mutation-tested
     before it is believed. Shared plumbing lives in `packages/native/tests/parity-io.h`
     (binary stream format v3, plus the deterministic stimulus generator) and
     `scripts/lib/parity-stream.mjs` (the JS-side reader and comparators), so a new module
     costs a battery and a runner, not a new harness.
-  - The `.js` DSP **stays in the tree** behind a runtime switch (`?dsp=js`) so the web
-    build can fall back instantly on a machine I can't test, and so it remains the parity
-    reference. It gets deleted once the desktop build has real hours on it, not on port day.
+  - **JS parity is a porting aid, not a gate — decided 2026-09-15, and it narrows the
+    remaining work.** The original framing had C canonical for *both* targets, which made
+    "the wasm and the `.js` agree" a shipping requirement and put a bit-identity baseline
+    on the critical path of every module. It isn't one: the desktop build is the product,
+    the web build is a demo, and Ableton doesn't have a browser version either. So from
+    `drum-synth` on, the `.js` is read as the specification while porting and its
+    divergence is measured because it's nearly free — but a module is done when its own
+    battery is green, not when V8 agrees with it.
+
+    What that changes in practice: no module is blocked on a libm difference it cannot
+    control; `drum-synth`'s two unfixable divergences (below) stop being blockers; and the
+    batteries for `onset`, `beat-classify` and `looper` can be built around *behaviour*
+    (does this detect the onset, does this loop stay in phase) rather than around
+    sample-for-sample agreement with a reference that is about to be abandoned. The six
+    modules already ported keep their pinned baselines — they cost nothing to keep and a
+    drop in them is still worth reading.
+  - **The `?dsp=js` runtime fallback is dropped** (was planned, never built). A second
+    sound engine reachable at runtime is a second engine to maintain, debug and reason
+    about, and its only purpose was hedging a web build that is not the product. The
+    `.js` stays in the tree as the porting reference and as what the demo build runs,
+    until the desktop build has real hours on it.
 - **A null/file driver** — a device backend that reads and writes WAV instead of hardware.
   This is what makes 5a testable without Windows: run the real native engine at a real
-  block size over known input, assert the output matches the JS engine sample-for-sample.
+  block size over known input and assert the output against a pinned baseline of its own,
+  with the JS engine's output alongside it as a reference to read rather than a bar to
+  clear (see the 2026-09-15 amendment above).
   That parity harness is the actual deliverable of 5a, and it is the thing that will catch
   a bad port before you ever hear it.
 - **Meter-layout parity** — the block has grown past 120 fields (loops at 68, transport at
@@ -719,10 +776,15 @@ and it's why the device panel keeps a shared-mode option rather than forcing exc
 - **Build:** cross-compile here now so there's something to test this week, and add the
   MSVC job to `.github/workflows/windows-build.yml` after, so it stops being a one-man
   toolchain.
-- **DSP route:** **(c)** — C canonical for both native and web. Decided after the biquad
-  spike came back bit-identical across all three implementations; see the Phase 5 DSP
-  section for the measurements and the two caveats (MSVC unmeasured, bit-identity not
-  guaranteed forever).
+- **DSP route:** **(c)** — one C source of truth, compiled natively for the `.exe` and to
+  wasm for the demo build. Decided after the biquad spike came back bit-identical across
+  all three implementations; see the Phase 5 DSP section for the measurements and the two
+  caveats (MSVC unmeasured, bit-identity not guaranteed forever).
+- **The desktop build is the product; the web build is a demo** (2026-09-15). JS parity is
+  a porting aid and a free canary, **not a gate** — a module ships when its own battery is
+  green. Corollary: the planned `?dsp=js` runtime fallback is **dropped** rather than
+  built, because a second reachable sound engine is a second engine to maintain and it was
+  only ever hedging the demo.
 - **Order:** Phase 5 first, then Phase 6. Within Phase 5, **all of 5a with the null-driver
   parity harness green before any Windows work starts.** It's tempting to chase the device
   layer first because that's where the payoff is, but a port validated only by ear is how

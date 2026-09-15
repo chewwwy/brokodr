@@ -488,7 +488,7 @@ result meaningless. Both halves are fixed:
    bug, it is always something to read before re-baselining, and the reason must go in the
    commit. Baselines pinned today: `utils` 84/85/96, `delay-line` 265/267/267, `fft`
    221/221/221 (native-vs-JS / wasm-vs-JS / native-vs-wasm), `chain` 21/21/21,
-   `drum-voice` 39/42/40 of 43.
+   `drum-voice` 39/42/40 of 43, `drum-rack` 49/51/49 of 51.
 
 4. **The chain cannot recognise its own quality param (design defect in the port, fixed).**
    `chain.js` recalculates the chain's latency when a `setParam` key equals the string
@@ -561,6 +561,72 @@ its whole length on purpose, so the next hit starts settled. The standstill acro
 ending block is the only observable difference between `env <= 0` and `env < 0` in the
 choke fade, because the extra frame a `< 0` test admits carries env 0 and is silent.
 
+`drum-rack` is the first module that is almost entirely *routing* — sixteen voices, sixteen
+optional chains, a solo, a mute, a gain and a flash counter — and the battery reflects
+that: 51 scripted cases, 224 asserted checks, 123 mutants, all caught. The DSP in it is
+two lines (the meter and the gain pass); everything else that can break is a pad index, an
+ordering, or a branch that should have been skipped. That changes what a parity harness is
+for. Bit-identity is near-total — 49 of 51 cases natively, 51 of 51 under emcc, 49 of 51
+across the two toolchains — and the two that drift are inherited, not new: `pad-params`
+and `soak` both move a pan knob, which lands in `drum-voice`'s `cos`, and glibc's `cos`
+disagrees with musl's in the last bit while musl's agrees with V8's. The same shape as
+`drum-voice`'s four, from the same call.
+
+Four harness bugs are worth recording, because three of them are the same bug in different
+clothes: **a test that passes while testing nothing.**
+
+  - `S_PAD_PARAMS` had a script row written five doubles wide instead of six. `OPS`
+    divides by six with integer division, so it compiled, silently dropped the script's
+    last op, and shifted every op after the typo one column left. The parity diff could
+    not see it — C and JS mis-read the same malformed script identically and agreed. Row
+    width is now a compile-time assertion (`ROWS_OK`, the `BUILD_BUG_ON_ZERO` trick: a
+    malformed script asks for a `char[-1]` and no compiler will take it).
+  - `S_CHOKE_IDLE` triggered pad 3 *before* pad 2, so pad 3 was still sounding when pad 2
+    fired. That is `S_CHOKE` again; the idle guard it was written for was never reached.
+  - `S_RELEASE` released pad 0 while pad 0 was the only pad sounding, so a `release()` that
+    ignored its index argument and always reached pad 0 passed it. It now releases pad 1
+    too, with pad 0 still ringing, which is the only arrangement that can tell the two
+    apart.
+  - Case-relative indexing (`offsetOf`/`snapOf`/`stateOf`) now throws a named error when a
+    check asks for snapshot 9 of a script that has eight, rather than reading `undefined`
+    and comparing it to nothing.
+
+Mutation found one real divergence in the port's *behaviour*, and it is a good one: **solo
+cutting an idle pad destroys a pan move it has not rendered yet.** `bk_drum_voice_set_param`
+on `PAN` sets the smoother's *target*; the value only walks toward it while the voice
+renders. The rack never renders an idle pad. So an idle pad can sit with `value != target`
+indefinitely — and `bk_drum_voice_reset` parks the smoother at `value`, discarding the
+target. The rack's solo branch resets only pads that are `active`, which is what keeps the
+pending pan intact; a mutant dropping that guard is therefore *not* equivalent, and no
+scripted case had ever visited the combination. `S_SOLO_IDLE_PAN` now does, and proves it
+by the only observable that exists: the idle pad's first hit after the solo has to land
+hard left, where its target said, not centre, where a destructive reset would have left it.
+
+Five more cases close the mechanical escapes, and each exists because the mutant that
+survived named exactly what was missing — a flash length at 8050 Hz where 90 ms is 724.5
+frames and `Math.round`, truncation and `rint` all give different answers; triggers and
+releases at 99, −1 and 16 with the flags read before any reset could hide them; pad 15,
+which nothing had ever touched, through `chainFor`/`trigger`/`reset`/`flash`; a pad left
+"active with its sample yanked" and re-triggered, which isolates the choke-self question
+via `trigger()`'s early return; and a `1e30` sample at +12 dB, which is the only stimulus
+where the bus-level `sanitize()` does anything the voice-level one has not already done.
+
+Three mutants escaped as **provably** equivalent — not argued, proved — and were replaced
+rather than accepted:
+
+  - Dropping `&& rk->pads[i].active` from the choke loop does nothing, because
+    `bk_drum_voice_choke` is itself `if (v->active) v->choking = 1;`. The rack's guard is
+    redundant with its callee's. Replaced with a mutant that writes `choking` directly and
+    skips the callee, which an idle same-group pad can see.
+  - Adding a bound check inside `trigger()`'s `if (!v)` branch is unreachable code:
+    `bk_drum_rack_pad` returns NULL *exactly* when the index is out of range. Replaced with
+    one that clamps a bad index onto pad 0 instead of rejecting it.
+  - Removing the `continue` from the solo-cut branch changes nothing, because the branch has
+    just reset the voice, so `active` is 0 without exception and the fall-through lands in
+    the idle guard, which clears the same meter and continues anyway. That `continue` is
+    defensive, not load-bearing. Replaced with one that loses the reset along with it, so
+    the cut pad renders into the bus.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -570,8 +636,9 @@ choke fade, because the extra frame a `< 0` test admits carries env 0 and is sil
     19 checks green) → `delay-line` (done, 30 checks green, 6/6 mutants caught) → `fft`
     (done, 52 checks green, 8/8 mutants caught) → `chain` (done, 91 checks green, 29/29
     mutants caught) → `drum-voice` (done, 142 checks green, 94/94 mutants caught) →
-    `drum-rack`, `drum-synth`, `onset`, `beat-classify` → **`looper.js` last**, being the
-    largest (925 lines) and most stateful.
+    `drum-rack` (done, 224 checks green, 123/123 mutants caught) → `drum-synth`, `onset`,
+    `beat-classify` → **`looper.js` last**, being the largest (925 lines) and most
+    stateful.
   - Each module gets its own parity battery, and each battery is itself mutation-tested
     before it is believed. Shared plumbing lives in `packages/native/tests/parity-io.h`
     (binary stream format v3, plus the deterministic stimulus generator) and

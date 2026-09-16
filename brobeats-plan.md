@@ -494,7 +494,9 @@ result meaningless. Both halves are fixed:
    bug, it is always something to read before re-baselining, and the reason must go in the
    commit. Baselines pinned today: `utils` 84/85/96, `delay-line` 265/267/267, `fft`
    221/221/221 (native-vs-JS / wasm-vs-JS / native-vs-wasm), `chain` 21/21/21,
-   `drum-voice` 39/42/40 of 43, `drum-rack` 49/51/49 of 51.
+   `drum-voice` 39/42/40 of 43, `drum-rack` 49/51/49 of 51. `drum-synth` pins **no**
+   identity baseline by design (see its writeup): its native-vs-wasm agreement, 128/129
+   records and 89/90 render fingerprints, is printed as a canary and cannot fail the run.
 
 4. **The chain cannot recognise its own quality param (design defect in the port, fixed).**
    `chain.js` recalculates the chain's latency when a `setParam` key equals the string
@@ -633,6 +635,140 @@ rather than accepted:
     defensive, not load-bearing. Replaced with one that loses the reset along with it, so
     the cut pad renders into the bus.
 
+#### `drum-synth` — the first module shipped without a bit-identity gate
+
+481 lines of C, six renderers, 90 render cases, **1748 asserted checks green, 155/155
+mutants caught**. It is the first module done under the 2026-09-15 decision (commit
+`f1da024`): the desktop build is the product, so V8 agreement is a porting aid and a free
+canary, not a ship gate. Nothing about the port was loosened to get there — the gate was
+never achievable on this module, for the two structural reasons written into the battery's
+header and repeated below.
+
+The battery is built in four layers, and **only the first is a hard gate against the JS**:
+
+  1. **Integer structure, exact.** The kind table and its order, all six default param
+     sets, all sixteen factory layout entries with their pad names and choke groups. No
+     libm anywhere in their derivation, so there is nothing to be tolerant about.
+  2. **Audio, held to bands.** Fourteen features computed by an identical no-libm ruler on
+     both sides.
+  3. **Invariants on the C output alone.** No non-finite sample ever, the 2 ms fade
+     reaches exact zero, both arms of the peak-normalisation branch are entered, and two
+     renders of identical input into differently-prefilled buffers agree bit for bit.
+  4. **Native vs wasm, measured and printed, not gated.**
+
+Layer 1 is what makes layer 2 safe to loosen, and that is the load-bearing part of the
+design: param resolution is gated to exact equality, and the render cases are then driven
+from the params *the C itself resolved and emitted*. A param-resolution bug therefore
+cannot hide inside an audio tolerance — it has to surface in layer 1 as an exact
+mismatch.
+
+**What the divergence actually measured, which is the useful surprise.** Eleven of the
+twelve compared features came back at a worst deviation of exactly **0.000e+0** against
+V8 — peak, rms, t90, hf, zc, clips, first, last, frames, fade, nonfinite. The whole
+observed disagreement across 90 renders is one feature on one case: `rim-tone-one.mean`,
+off by **5.254e-21 absolute / 4.596e-14 relative**, which is about one float32 ULP landing
+deep in a fade tail on a feature that is near zero because every kind renders essentially
+DC-free. Cross-toolchain, the same story from the same call: **128/129 records
+bit-identical, 89/90 render cases byte-identical by fingerprint**, the one exception being
+that same `rim-tone-one`. So the module that could not be gated on bit-identity is, in
+practice, very nearly bit-identical anyway — and the two reasons it cannot be gated are
+still exactly right:
+
+  - **Peak normalisation is global.** `bk_drum_render` scans the finished render for its
+    peak and scales the whole buffer by `0.89/peak`. One ULP landing on whichever sample
+    happens to *be* the peak rescales every other sample. A local error becomes a global
+    one.
+  - **The hat renderer puts a comparator on a transcendental.** `m += sin(ph[k]) >= 0 ? 1
+    : -1`, six inharmonic partials as square waves, ~260k comparisons in a 900 ms ride.
+    One ULP near a crossing flips a term by a full ±1.
+
+Neither fired on this battery's inputs. Both remain certainties over a kit editor's worth
+of knob positions, which is the difference between "measured clean today" and "safe to
+assert forever" — precisely the distinction commit `f1da024` was about.
+
+The bands were set from the measured spread with headroom, not guessed: float32 features
+get `rel 2e-7` (just above the 1.2e-7 that one ULP costs, the tightest they can be without
+being a bit-identity gate in disguise); `mean` gets `rel 1e-6 / abs 1e-15`, six and eight
+orders above its worst observed; `zc` and `clips` sit on comparators where the quantum of
+legitimate disagreement is a whole unit, so they get `abs 2` against counts in the
+hundreds to thousands; `t90` is quantised to `1/frames`, so its tolerance is two frames'
+worth computed per case rather than a constant; `frames`, `fade`, `nonfinite` and `last`
+are exact.
+
+**Nine of the 90 cases are C-only, structurally and not by excuse.** `drum-synth.js`
+always allocates its scratch at the full `ceil(sr * 4)`, so the renderers' own
+`Math.min(out.length, ...)` truncation branch is unreachable from the JS public API at
+all. The C port takes a caller-owned buffer and can reach it, so four `trunc-*` cases do.
+The rest need a sample rate the JS cannot survive on top of that: `tiny-peak` at 240 MHz,
+`peak-guarded` and `peak-normalised` at 420 MHz to sit either side of the `peak <= 1e-6`
+branch (rates at which the JS would try to allocate multi-gigabyte scratch), and
+`hat-phase-underflow` at 1e51. `kick-wrap-boundary` is C-only for a plainer reason: it
+needs a buffer shorter than four seconds. All nine are identified structurally by
+`out_len < ceil(sr*4)`, held to layer 3 only, each with a dedicated invariant.
+
+**Mutation testing took five rounds and produced two genuinely new techniques.** Five
+mutants survived the battery as first written. None was a bug in the port —
+`drum-synth.c` has not been edited once since it was written, across any session — and
+none was accepted as an escape. Two were closed by finding an input that distinguishes
+them, and three by proving the mutant equivalent and replacing it with one that attacks
+the same code somewhere it is observable.
+
+The technique worth keeping: **push sample rate and tune to values that are finite and
+legal but never occur in ordinary use.** Both new cases came out of it.
+
+  - `hat-comparator` — surviving because nothing pinned `sin`'s comparator to its
+    boundary. Closed with `hat-phase-underflow`: at `tune=1e40` the hat's `base_f`
+    saturates at 2520 Hz, and at `sr=1e51` all six phase increments (3.17e-47 to
+    1.30e-46) fall below `2^-150` and round to exactly `+0.0` in float32. The phase array
+    stays parked at `+0.0`, `sin(+0.0)` sits exactly on the `>= 0` boundary, and the
+    invariant asserts every sample is positive — the `+1` arm — which a `> 0` mutant
+    cannot produce.
+  - `kick-wrap` — surviving because no case ever landed the kick's phase accumulator *on*
+    its wrap threshold. Closed with `kick-wrap-boundary` at `sr=20, tune=20, drop=0`,
+    where `f` is constant at 20 and the increment is exactly `2*pi*20/20`, landing the
+    accumulator on the double nearest `2*pi`. The pristine `>` guard does not fire, so
+    `sin` returns the small negative residual — a 27-frame ramp peaking at 2.449e-16 —
+    while a mutant that wraps at `BK_PI` renders a buffer of **pure silence**. This one
+    needed no mutant-table edit at all: the original mutant is now caught as written.
+
+Three equivalence proofs, each replaced rather than accepted:
+
+  - **`hat-phase-double`.** Widening the `ph[6]` declaration from `float` to `double`
+    changes nothing, because every write to `ph[k]` already passes through an explicit
+    `(float)` cast. Float32-ness is enforced **twice**, so a single-site mutation of
+    either site alone is provably a no-op. Verified empirically as well as by reading:
+    zero output difference at normal *and* underflow rates. Replaced with
+    `hat-phase-f32`, a two-site mutant that widens the declaration **and** removes both
+    casts — which fails 45 checks.
+  - **`hat-wrap`.** Weakening the hat's wrap guard from `>` to `>=` is unobservable
+    because `ph[k]` can never equal `BK_TWO_PI` exactly. `BK_TWO_PI` as a double is
+    `401921fb54442d18`, whose low 29 mantissa bits are nonzero; every float32 widened to
+    double has exactly 29 trailing zero mantissa bits; so no float32-derived value can hit
+    it. The two neighbouring float32s straddle it (6.2831850051879883 <
+    `BK_TWO_PI` < 6.2831854820251465), and `+inf`, `-inf` and `NaN` all take the same
+    branch under both comparators. Replaced with `hat-no-wrap`, which deletes the guard
+    entirely — 54 failed checks.
+  - **`kick-hp-freq`.** Changing the kick highpass's corner from 18 Hz to 19 Hz is
+    unobservable at *every* sample rate, not just the tabled ones, because `bk_clamp` is
+    `x < lo ? lo : (x > hi ? hi : x)` — it tests the low bound first and returns without
+    consulting `hi`, and both 18 and 19 are below the 20 Hz floor, so both collapse to
+    exactly 20.0. Replaced with `kick-hp-above-floor`, 18 → 30, above the floor, where the
+    clamp passes the value through and the filter genuinely differs.
+
+Two process notes, both earned the hard way:
+
+  - **Every fix was confirmed by swapping the real `drum-synth.c`, running the full
+    battery, and then `diff -q`-ing the restore** — not by a scratch copy. A scratch
+    program proves a mechanism; only the real source proves the harness catches it.
+  - **A background sweep can deadlock with zero CPU and look identical to "still
+    running".** The per-mutant guard inside the harness is a 120 s `SIGKILL` timeout; the
+    sweep as a whole has none, so it runs under `tmux` and is polled with `ps -ef
+    --forest` plus log growth. That timeout also produced the one false alarm worth
+    recording: a full sweep reported `154/155 caught, 1 harness problem —
+    def-snare-snap: timed out`, which was CPU contention, not an escape. Re-run in
+    isolation it was caught, and a clean re-sweep came back **155/155, 0 escaped, 0
+    harness problems**. A timeout is not a result; re-run it before believing it.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -642,11 +778,13 @@ rather than accepted:
     19 checks green) → `delay-line` (done, 30 checks green, 6/6 mutants caught) → `fft`
     (done, 52 checks green, 8/8 mutants caught) → `chain` (done, 91 checks green, 29/29
     mutants caught) → `drum-voice` (done, 142 checks green, 94/94 mutants caught) →
-    `drum-rack` (done, 224 checks green, 123/123 mutants caught) → `drum-synth`, `onset`,
+    `drum-rack` (done, 224 checks green, 123/123 mutants caught) → `drum-synth` (done,
+    1748 checks green, 155/155 mutants caught, no identity gate by design) → `onset`,
     `beat-classify` → **`looper.js` last**, being the largest (925 lines) and most
     stateful.
-  - **`drum-synth` (next) is the first module deliberately ported without a JS-parity
-    gate, and reading it is what forced the question.** 321 lines, six renderers, and it
+  - **`drum-synth` (done — see its writeup above for the result) is the first module
+    deliberately ported without a JS-parity gate, and reading it is what forced the
+    question.** 321 lines, six renderers, and it
     never touches the audio thread — it runs at kit-build time and when a knob moves in
     the kit editor, rendering up to 4 seconds into a buffer in one call. That is what
     "offline" means here: off the audio thread, in both builds, not "the exe only". It is

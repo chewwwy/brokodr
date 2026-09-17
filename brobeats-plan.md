@@ -769,6 +769,170 @@ Two process notes, both earned the hard way:
     isolation it was caught, and a clean re-sweep came back **155/155, 0 escaped, 0
     harness problems**. A timeout is not a result; re-run it before believing it.
 
+#### `onset` — the module that got its identity gate back
+
+470 lines of C against a 271-line header, 43 detection cases, **54 asserted checks green,
+166/166 mutants caught**. It is the second module ported after commit `f1da024` retired JS
+parity as a ship gate — and it is the one that made the gate again anyway, on its own
+merits rather than by policy.
+
+**The result worth leading with: `onset` is bit-identical to the JavaScript, everywhere it
+was measured.** 43/43 detection cases agree on count, on every frame position, on every
+strength and on every feature at a worst deviation of exactly **0.000e+0**. All **8127**
+raw detector fields — every accumulator, every follower state, every filter coefficient,
+the whole lag history and the commit ring's contents — match V8 bit for bit. Cross-toolchain
+the same: **397/397 records identical between glibc/x86-64 and emscripten/wasm**, worst
+deviation `0.000e+0`. Under `f1da024` that identity is a canary and not a requirement, so
+it is asserted as a **pinned baseline** (`43/43, baseline 43`) rather than as a
+loosenable tolerance: it can only be changed deliberately, never eroded by accident.
+
+Why this module could hold the line that `drum-synth` structurally could not: onset has no
+global normalisation step and no comparator sitting on a transcendental. Its one
+comparator-on-arithmetic is the zero-crossing counter, and that runs on raw sample signs,
+not on `sin`. Everything else is biquads and envelope followers in `double`, which both
+toolchains compute identically.
+
+The battery is six layers, five of them hard gates:
+
+  1. **Exact structure.** Defaults, `FEATURE_COUNT`, the ToInt32 table, lag-history sizing
+     across 18 sample rates, the 38 parameter clamps, crossover coefficients, and a late
+     `setParam` landing on the constructor's exact coefficients.
+  2. **Detection against the JavaScript**, bit-identical and baselined.
+     - **2e — the capacity bound the JS does not have.** The C `detect()` writes into a
+       caller-owned buffer with a `capacity`; the JS returns an array and cannot truncate.
+       Six cases find more hits than their capacity, the deepest carrying 24 committed
+       measurements against 4 slots, and the assertions cover both that the hits which fit
+       are the JS's and that the rest of the buffer is untouched.
+     - **2b — the streaming API, block by block.** Per-block counts, `pendingFeature`,
+       `commitCount`, drained features, and the live block-local `features` array at full
+       width (not just up to `count`, which was one of the harness holes found below).
+     - **2c — the commit ring's staleness boundaries**, 344 boundary probes, with one case
+       deliberately overflowing the ring.
+     - **2d — every field, raw, either side of `reset()`.** Asserts that `reset()` leaves
+       a detector exactly as a fresh one, that the JS's `reset()` does too, and — the
+       non-vacuity half, which is the part that actually earns the check — that all 24
+       resettable fields and 46191 lag slots were dirty in at least one case first.
+  3. **Invariants on the C alone.** No non-finite anywhere in 397 records, band features
+     normalised or zero, features and strengths in `[0, 1]`, hits strictly ordered and
+     never closer than the refractory period, non-finite input not silencing the detector,
+     and silence producing no hits.
+  4. **Native vs wasm**, printed and — with one deliberate exception below — informational.
+
+**The most valuable thing this port produced is a hard gate that did not exist in any
+earlier module: native held directly to wasm.** The first clean sweep read `126/170
+caught, 44 escaped`, and two of those escapes, `to-int32-nowrap` and
+`to-int32-nonfinite`, were contradictory — a standalone probe showed `to-int32-nowrap`
+visibly changing wasm output on 13 of the 46 tabled inputs, while the sweep insisted it
+escaped. Reading the assertion explained it: the to-int32 layer compared native against
+the **JS oracle** only, and never native against wasm. Converting a double that is
+negative or out of int32 range is undefined behaviour in C, and the two toolchains resolve
+it differently — **x86-64 wraps, wasm saturates to 0** — so the single most
+toolchain-divergent function in the module had no cross-toolchain assertion at all. A
+53rd check became a 54th: `ToInt32 identical native vs wasm on all 46 inputs`, hard-gated,
+skipped with a logged message only when `emcc` is absent. That is the first place in the
+port where wasm can fail a build rather than merely be reported, and it is there because
+it is the one function whose correctness is a property of the *pair* of toolchains rather
+than of either one against the JS.
+
+**Forty-four escapes, and not one of them was a bug in the port.** `onset.c` was never
+edited for behaviour across the whole triage — the only edits it took were four explanatory
+comments. The 44 split into real harness holes (fixed by extending the battery, which grew
+it from 34 checks to 54) and equivalent mutants (replaced, never accepted). The holes worth
+naming:
+
+  - **The block-local API was never read.** `d->features` (8×4 — what live Smart Voice
+     actually eats) and `d->count` were emitted by nobody. Four escapes died to snapshotting
+     them after every block.
+  - **Features were only compared over the hits that were found.** The verifier looped to
+     `min(cCount, MAX_HITS)`, so every features row past the hit count was emitted and never
+     read, and the `memset` that clears them was unobservable. One-line fix, loop to
+     `MAX_HITS`; the padding it needs was already there.
+  - **`reset()`/init state was only observed through audio**, which killed twelve
+     `reset-*` mutants plus two init mutants once a raw field dump went in.
+  - **Params were never set after init**, so the guarded refresh path had no coverage.
+  - **`res->capacity` truncation was never exercised** — hence layer 2e existing at all.
+
+**One equivalence claim from the earlier triage was refuted by measurement, and that is
+the process note worth keeping.** `commit-total-eps` had been written off as unreachable:
+`total` never gets small enough for the `<= 1e-12` branch to matter. Over the then-40 cases
+and 628 commits the smallest `total` was 2.05e-4, which is exactly why it escaped — but a
+grid search over admissible parameters found `total <= 1e-12` in 26 of 1980 trials, down to
+**1.11e-14**, and never exactly zero. The branch is reachable; the claim was wrong. The
+mechanism is that a **one-frame** feature window — `featureMs` 3 at a sample rate under
+~667, where `ToInt32(3 * 0.001 * sr)` is 0 and the `max(1, ...)` clamp takes over — can land
+on a single frame where all three band filters sit near a zero crossing. One new case
+(`sr=333`, hat stimulus, amp `2^-15`) kills three mutants at once: commit 2 at 1.38e-13
+falls in the `<= 1e-12` branch, commit 1 at 3.10e-12 falls in `(1e-12, 1e-6]`, and every
+window in it is `ToInt32(0.999) = 0` clamped up to 1, which also pins `proc-window-min`.
+A reachability argument that has not been searched against is a hypothesis.
+
+**`detect-tail-len` got the same treatment and survived it.** The claim was that the
+`+ block_size` term on `tail_frames` is slack another mutant covers. A standalone probe
+linked the real pristine `onset.c` against a hand-mutated copy and swept sample rates,
+feature windows, buffer lengths, block sizes and how many frames before the buffer end the
+final click sits: **360 lines of disagreeing output**. At `sr=100, featureMs=3, n=256,
+blk=1` the pristine build reports real features for the last hit and the mutant reports
+`0,0,0,0`. Not equivalent. It is now covered by a new case, `tail-tiny-window` at `sr=250`
+with a 4092 ms window, chosen so `ToInt32(featureMs * 0.001 * sr)` is 0 and the tail is
+*purely* the `+ block_size` term.
+
+**Nine mutants replaced, three removed with a proof, two folded into one.** Every
+replacement was verified caught by a targeted re-sweep before being kept:
+
+  - `refresh-q-span-floor` — a `0.001` floor on the Q-span denominator is unreachable
+    because the crossover clamps guarantee a span of at least 500. Replaced with a `600.0`
+    floor, above the reachable minimum, which is observable.
+  - `set-unknown-key` — turning the early `return` into a `break` that falls into the
+    refresh is invisible, because a refresh on an unknown key does not disturb the biquad
+    cache. Replaced with one that writes `d->sensitivity = value` on an unknown key:
+    direct, observable state corruption.
+  - `commit-idx-cap` — loosening `idx >= MAX_HITS` is unreachable (`pending_index` is
+    either `count < 8` or `-1`). Replaced with `idx >= BK_ONSET_MAX_HITS - 1`, which
+    *tightens* the bound by one and drops the eighth hit's features.
+  - `commit-clears-window` — dropping the `window_left = 0` clear is unobservable because
+    the only reachable call site re-arms it immediately. Replaced with one that sets
+    `window_left = 1`, leaving the window open so it re-commits.
+  - `commit-zcr-guard` — `secs > 0.0` → `>= 0.0` is unreachable since `acc_frames >= 1` at
+    every commit. Replaced with `secs > 0.01`, a materially different threshold that throws
+    away short windows' ZCR.
+  - `proc-ratio-lo-guard` — replaced `p_lo >= 0.0` with `p_lo > 1e-3`, moving the epsilon
+    up into signal level.
+  - `proc-ratio-lo-inf` → **`proc-ratio-sat`**, and this one is the instructive failure.
+    The replacement was first written as a single-band change (`r_lo`'s saturation constant
+    99 → 4) and it **escaped on its own targeted sweep**. The ratio is a `max` across three
+    bands, so any one band's saturation constant is masked by the other two. Changing all
+    three simultaneously is caught.
+  - `drain-commit-guard` — the dropped condition is genuinely redundant with
+    `bk_onset_read_committed`'s own first line, which returns 0 on `n >= commit_count`, and
+    the callee takes a `const bk_onset *`. Replaced with an off-by-one on the bound
+    (`(long long)(*drained) + 1 < d->commit_count`) that strands the newest commit.
+  - `detect-final-drain` + `detect-tail-drain` — each was individually redundant with the
+    other catching the observable case. Folded into a single **`detect-late-drain`** that
+    removes both drains together: a window closing during the tail must still get its
+    features drained.
+  - `set-guard-gone`, `detect-blk-default`, `detect-count-init` — **removed**, each with a
+    reachability proof written into `onset.c` as a permanent comment rather than left as a
+    bare claim. `set-guard-gone`: `bk_biquad_init` resets `type`/`freq`/`q`/`gain_db` to
+    the sentinels `-1`/`-1.0`/`-1.0`/`-1.0`, so any refresh cached before
+    `bk_onset_init` runs cannot survive construction. `detect-blk-default`: only the
+    *positivity* of the default is observable, and the `blk-1`/`blk-64`/`blk-128`/`blk-1024`
+    cases already pin detection as block-size-invariant. `detect-count-init`: `res->count = 0`
+    before the `memset` is a dead store, overwritten unconditionally at the function's
+    single exit.
+
+The standing rule held throughout, and it is the rule that made this module's triage
+useful: **nothing goes into `onset.c`'s permanent comments unless it is backed either by a
+reachability proof or by a replacement mutant the battery demonstrably catches.** Preferring
+"find a differently-shaped mutant that is caught" over "prove the original equivalent"
+turned two of the 44 escapes into refuted claims and one into a genuine missing hard gate.
+An equivalence claim is the cheapest possible way to close an escape, which is exactly why
+it deserves the most suspicion.
+
+Two caveats carry forward unchanged: **MSVC remains completely unmeasured** — the
+cross-toolchain agreement here is glibc versus emscripten on Linux/x86-64 only — and
+**bit-identity is empirical per module, not a guarantee.** `onset` making the gate says
+nothing about `beat-classify` or `looper` making it.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -779,9 +943,10 @@ Two process notes, both earned the hard way:
     (done, 52 checks green, 8/8 mutants caught) → `chain` (done, 91 checks green, 29/29
     mutants caught) → `drum-voice` (done, 142 checks green, 94/94 mutants caught) →
     `drum-rack` (done, 224 checks green, 123/123 mutants caught) → `drum-synth` (done,
-    1748 checks green, 155/155 mutants caught, no identity gate by design) → `onset`,
-    `beat-classify` → **`looper.js` last**, being the largest (925 lines) and most
-    stateful.
+    1748 checks green, 155/155 mutants caught, no identity gate by design) → `onset`
+    (done, 54 checks green, 166/166 mutants caught, bit-identical to the JS and baselined
+    anyway) → `beat-classify` → **`looper.js` last**, being the largest (925 lines) and
+    most stateful.
   - **`drum-synth` (done — see its writeup above for the result) is the first module
     deliberately ported without a JS-parity gate, and reading it is what forced the
     question.** 321 lines, six renderers, and it

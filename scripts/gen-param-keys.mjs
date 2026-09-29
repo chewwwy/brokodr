@@ -42,7 +42,7 @@ if (typeof Bun === "undefined") {
 }
 
 const { EFFECTS } = await import(SCHEMA);
-const { PAD_KEY, DRUM_KEY } = await import(BACKEND);
+const { PAD_KEY, DRUM_KEY, LOOP_KEY, LOOPER_KEY, CLOCK_KEY } = await import(BACKEND);
 
 /*
  * The drum pads do not live in EFFECTS. A pad is not a chain slot: its params
@@ -67,6 +67,9 @@ function workletCopy(name) {
 for (const [name, authoritative] of [
   ["PAD_KEY", PAD_KEY],
   ["DRUM_KEY", DRUM_KEY],
+  ["LOOP_KEY", LOOP_KEY],
+  ["LOOPER_KEY", LOOPER_KEY],
+  ["CLOCK_KEY", CLOCK_KEY],
 ]) {
   const mirror = workletCopy(name);
   if (!mirror) {
@@ -98,7 +101,7 @@ w("/*");
 w(" * Bro.Kodr DSP core — parameter keys. GENERATED, DO NOT EDIT.");
 w(" *");
 w(` * Sources:   ${REL_SCHEMA} (chain effect params)`);
-w(` *            ${REL_BACKEND} (pad and rack params)`);
+w(` *            ${REL_BACKEND} (pad, rack, looper, transport params)`);
 w(" * Generator: scripts/gen-param-keys.mjs");
 w(" *");
 w(" * Regenerate with `bun scripts/gen-param-keys.mjs`. CI runs the same script");
@@ -164,6 +167,37 @@ for (let i = 0; i < DRUM_KEY.length; i++) w(`  BK_DRUM_P_${screaming(DRUM_KEY[i]
 w(`  BK_DRUM_P_COUNT = ${DRUM_KEY.length}`);
 w("};");
 w();
+
+/* --- the looper and the transport, also not effect types ---------------- */
+
+w("/*");
+w(" * Per-track looper params (OP.LOOP / LOOP_FIELD.PARAM). Same contract as the");
+w(" * pad list: the index IS the wire key, and bk_looper_set_track_param");
+w(" * switches on the number. The transport verbs — rec, play, stop, clear,");
+w(" * undo, clearAll — are NOT here; they carry no value and travel as their own");
+w(" * ring fields, so they are functions on bk_looper rather than params.");
+w(" */");
+w("enum {");
+for (let i = 0; i < LOOP_KEY.length; i++) w(`  BK_LOOP_P_${screaming(LOOP_KEY[i])} = ${i},`);
+w(`  BK_LOOP_P_COUNT = ${LOOP_KEY.length}`);
+w("};");
+w();
+w("/* Looper-bus params, one per looper rather than per track (OP.LOOPER). */");
+w("enum {");
+for (let i = 0; i < LOOPER_KEY.length; i++) w(`  BK_LOOPER_P_${screaming(LOOPER_KEY[i])} = ${i},`);
+w(`  BK_LOOPER_P_COUNT = ${LOOPER_KEY.length}`);
+w("};");
+w();
+w("/*");
+w(" * Transport params (OP.CLOCK). BK_CLOCK_P_RESET takes no value — the key");
+w(" * itself is the command — and is a param rather than a function because that");
+w(" * is how it arrives on the ring.");
+w(" */");
+w("enum {");
+for (let i = 0; i < CLOCK_KEY.length; i++) w(`  BK_CLOCK_P_${screaming(CLOCK_KEY[i])} = ${i},`);
+w(`  BK_CLOCK_P_COUNT = ${CLOCK_KEY.length}`);
+w("};");
+w();
 w("#endif /* BROKODR_DSP_PARAM_KEYS_H */");
 
 const out = lines.join("\n") + "\n";
@@ -182,12 +216,16 @@ if (process.argv.includes("--check")) {
   }
   console.log(
     `param-keys.h is up to date — ${types.length} effect types, ${total} params, ` +
-      `${PAD_KEY.length} pad params, ${DRUM_KEY.length} rack params`,
+      `${PAD_KEY.length} pad params, ${DRUM_KEY.length} rack params, ` +
+      `${LOOP_KEY.length} loop params, ${LOOPER_KEY.length} looper params, ` +
+      `${CLOCK_KEY.length} clock params`,
   );
 } else {
   writeFileSync(OUT, out);
   console.log(
     `wrote ${OUT} — ${types.length} effect types, ${total} params, ` +
-      `${PAD_KEY.length} pad params, ${DRUM_KEY.length} rack params`,
+      `${PAD_KEY.length} pad params, ${DRUM_KEY.length} rack params, ` +
+      `${LOOP_KEY.length} loop params, ${LOOPER_KEY.length} looper params, ` +
+      `${CLOCK_KEY.length} clock params`,
   );
 }

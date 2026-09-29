@@ -2,7 +2,7 @@
  * Bro.Kodr DSP core — parameter keys. GENERATED, DO NOT EDIT.
  *
  * Sources:   packages/web/src/web/audio/param-schema.ts (chain effect params)
- *            packages/web/src/web/audio/backend.ts (pad and rack params)
+ *            packages/web/src/web/audio/backend.ts (pad, rack, looper, transport params)
  * Generator: scripts/gen-param-keys.mjs
  *
  * Regenerate with `bun scripts/gen-param-keys.mjs`. CI runs the same script
@@ -356,6 +356,44 @@ enum {
   BK_DRUM_P_SOLO = 2,
   BK_DRUM_P_ROUTE = 3,
   BK_DRUM_P_COUNT = 4
+};
+
+/*
+ * Per-track looper params (OP.LOOP / LOOP_FIELD.PARAM). Same contract as the
+ * pad list: the index IS the wire key, and bk_looper_set_track_param
+ * switches on the number. The transport verbs — rec, play, stop, clear,
+ * undo, clearAll — are NOT here; they carry no value and travel as their own
+ * ring fields, so they are functions on bk_looper rather than params.
+ */
+enum {
+  BK_LOOP_P_GAIN = 0,
+  BK_LOOP_P_MUTE = 1,
+  BK_LOOP_P_SOLO = 2,
+  BK_LOOP_P_PAN = 3,
+  BK_LOOP_P_SYNC = 4,
+  BK_LOOP_P_SOURCE = 5,
+  BK_LOOP_P_COUNT = 6
+};
+
+/* Looper-bus params, one per looper rather than per track (OP.LOOPER). */
+enum {
+  BK_LOOPER_P_GAIN = 0,
+  BK_LOOPER_P_MUTE = 1,
+  BK_LOOPER_P_COUNT = 2
+};
+
+/*
+ * Transport params (OP.CLOCK). BK_CLOCK_P_RESET takes no value — the key
+ * itself is the command — and is a param rather than a function because that
+ * is how it arrives on the ring.
+ */
+enum {
+  BK_CLOCK_P_BPM = 0,
+  BK_CLOCK_P_BEATS_PER_BAR = 1,
+  BK_CLOCK_P_QUANTIZE = 2,
+  BK_CLOCK_P_RUN = 3,
+  BK_CLOCK_P_RESET = 4,
+  BK_CLOCK_P_COUNT = 5
 };
 
 #endif /* BROKODR_DSP_PARAM_KEYS_H */

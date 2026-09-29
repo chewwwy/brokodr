@@ -933,6 +933,203 @@ cross-toolchain agreement here is glibc versus emscripten on Linux/x86-64 only �
 **bit-identity is empirical per module, not a guarantee.** `onset` making the gate says
 nothing about `beat-classify` or `looper` making it.
 
+#### `beat-classify` — the two-stage classifier, and the escapes that were contracts
+
+578 lines of C against a 362-line header, a 1703-line producer and a 1583-line verifier.
+**100 Smart Voice cases, 72 asserted checks green, 107/107 mutants caught.** It is the
+third module ported after `f1da024` retired JS parity as a ship gate, and like `onset` it
+made the gate anyway.
+
+**`beat-classify` is bit-identical to the JavaScript, everywhere it was measured.** All
+five behavioural and structural layers report **100/100 records bit-identical to the JS**,
+every one of the 17 layer-1 exact checks is bit-identical on its own records, **1002/1002
+records are identical between glibc/x86-64 and emscripten/wasm**, all 100 passes agree on
+every fire's block, pad, class and stage, and the worst float deviation anywhere in the
+battery is exactly **0.000e+0**. Under `f1da024` that is a canary, not a requirement, so
+it is printed rather than gated — but nothing in the module has ever been observed to move
+off it.
+
+Why a module with a *comparator on a transcendental* could still hold the line: Smart
+Voice's only transcendentals are `20*log10()` in `gainToDb` and the `sqrt()` in classify's
+confidence ratio, and neither one sits upstream of a discrete decision that the harness
+can see diverge. The ratio comparison `scratch_ratio < margin` does read a `sqrt`, but
+both toolchains and V8 agree on it to the last bit on every vector in the roster, and the
+roster deliberately includes ties at ratio exactly 1.
+
+The battery is five layers, four of them hard gates:
+
+  1. **Exact structure** — 17 checks, all bit-identical. Defaults, the factory centroid and
+     attack profiles with their class pads, `STAGE1_DELAY_BLOCKS`, lag-history sizing
+     forwarded to the detector across 8 sample rates, all 76 parameter clamps read back
+     through *both* construction paths, `init(opts) == init(NULL) + setParam` for every
+     in-band key, the three ToInt32 setters over 62-record sweeps each (`setCentroid`,
+     `setAttackCentroid`, `setClassPad`) plus `setCapture` over 31, `resetCentroids`,
+     `classify` over 36 vectors on three different profiles (factory, poked, collapsed),
+     `velocityFrom` across the floorDb × velMin × velDb grid, and hazard 1 pinned directly
+     at the composed call site.
+  2. **Whole passes against the JavaScript**, with hazard 3 (`every fired class inside
+     [0, CLASS_COUNT)`), hazard 2 (`the wrap cases really do wrap the pending id through
+     zero`), a non-finite scrub over every meter, velocity and confidence, and a
+     poisoned-block row asserted to keep firing identically to its clean twin.
+  3. **The stream, block by block** — the pending table at full width, caught mid-countdown
+     so a slot with `pend_wait` still ticking is observed and not just its result.
+  4. **The capture ring and its staleness boundaries** — 64 slots at stride 9, with rows
+     that fill it, a row that overruns it, and `clearCaptures` asserted to make every probe
+     stale at once *while leaving the contents in the array*.
+  5. **Raw state either side of `reset()` and `resetDetector()`** — all 31 named scalar
+     fields plus the ids, split into what the calls must clear and what they must
+     deliberately leave alone (the profile, the capture ring, five stale pending fields),
+     with the non-vacuity half asserting 32 tracked fields were dirty first and that at
+     least one case leaves a used slot mid-flight.
+
+Each of layers 2, 3 and 4 replays the same case roster independently, and the roster is
+pinned once from the pass layer and compared against — so a layer that silently drops or
+duplicates a case reads as a failure rather than as a smaller, still-green battery. The
+`ToInt32` setters keep `onset`'s hard cross-toolchain gate: **identical native vs wasm on
+all 217 records**, since converting an out-of-range double is undefined behaviour that
+x86-64 and wasm resolve differently.
+
+**Every escape in this module's triage was closed, and not one of them was a bug in the
+port.** `beat-classify.c` took no behavioural edit across the whole triage — its only
+edits were explanatory comments, including one *correction* described below. The escapes
+split the same way `onset`'s did, into real harness holes and mutants that were equivalent
+within the harness's declared contract.
+
+The harness holes, and the cases that closed them:
+
+  - **No case ever turned `enabled` back off.** `enable-midway` switched it on mid-pass and
+    nothing switched it off again, so `process()`'s `if (!v->enabled) return 0;` early
+    return was only ever observed from the *entry* side. That left three mutants alive at
+    once: `enable-reset`, and — because the early return sits above `v->fire_count = 0`
+    only in the mutant — `pr-firecount-late`. The producer grew a `disable_at_block` knob
+    (the old `maybe_enable` became `maybe_toggle`, applying both directions), and two rows:
+    `disable-midway`, which disables on a block that had not just fired, and
+    `disable-after-fire`, which disables on block 3 of a dense hat burst at `block_size`
+    4096 so the toggle lands immediately after a block that *did* fire. The second row is
+    the one `pr-firecount-late` needed — with the first alone the reorder is unobservable,
+    because there is no stale `fire_count` to leak.
+  - **The stage-2 catch-up clamp never had any work to do.** `if (v->drained <
+    det->commit_count - BK_VOICE_PEND_SLOTS)` exists so a voice that has fallen more than
+    16 commits behind skips the unrecoverable ones instead of walking them. Every
+    `counter_seed` row poked `drained` and `commit_count` to the *same* value, so the
+    clamp's condition was false in all 94 rows and `pr-no-catchup` and `pr-catchup-slots`
+    both escaped. A `drain_lag` knob now winds `drained` back from the seed, and
+    `drain-lag-24`/`drain-lag-24-fast` wind it back **24**, chosen to sit between
+    `PEND_SLOTS` (16) and `CAP_SLOTS` (64) so a clamp written against the wrong constant
+    is separated from a correct one.
+
+**Three escapes were closed by a proof that the mutant is equivalent, and all three were
+replaced rather than written up.** Per the standing rule, no equivalence claim goes into
+`beat-classify.c`'s permanent comments unless a replacement mutant the battery
+demonstrably catches goes in beside it; the proofs live in the throwaway sweeper.
+
+  - `init-gap-fwd` — deleting `det_opts[MIN_GAP_MS] = defaults[VOICE_MIN_GAP_MS]` writes the
+    value already there: `bk_onset_defaults()` ran two lines above, and the detector's own
+    min-gap default (45.0, `onset.c`) equals Smart Voice's (45.0, same file as the line
+    under test). Any row's own `min_gap` is forwarded again by the `set_param` loop at the
+    bottom of `init`. Replaced with **`init-gap-src`** — the right slot fed from the wrong
+    default field — which every row that leaves `min_gap` absent now catches.
+  - `floor-fwd-clamped` — forwarding the already-clamped `v->floor_db` instead of the raw
+    `value` is idempotent, because `onset.c`'s own clamp is *character for character* the
+    same bounds, `bk_max(-90.0, bk_min(-6.0, value))`. The comment on the line above is
+    still right about the intent — the JS forwards unclamped, and the day either range
+    moves the two stop agreeing — but that is a reason to keep the code, not a divergence
+    the battery can see. Replaced with **`floor-fwd-drop`**, which deletes the forward and
+    leaves the detector on `init`'s floor while the velocity map tracks the row's own.
+  - `mtr-level` — reading `v->det.level.env` in place of the cached `v->level` is the same
+    load at every point a caller can look. `v->level` has exactly three writers (0.0 in
+    `init`, 0.0 in `resetDetector`, `det->level.env` in `process` on the line below
+    `bk_onset_process`) and `det.level.env` exactly two (`bk_onset_process`, and
+    `bk_env_follower_reset` via `bk_onset_reset`, which `resetDetector` pairs with its own
+    0.0 store); `process()`'s disabled early return is above both. Replaced with
+    **`mtr-level-stale`**, which swaps those two lines so the cache reads the *previous*
+    block's envelope — the staleness a cached field is actually at risk of.
+
+**Two more escapes were equivalent not to the code but to the harness's declared
+tolerance, and those are the ones worth reading.** `f1da024` says float32-descended values
+are held to `TOL.sampleFloat = 2e-6` rather than to bit-identity. A mutant can therefore
+be a genuine behaviour change and still be *inside the contract*, and the right response is
+neither to accept it nor to tighten a gate that would then be false.
+
+  - `s1-emit-float-vel` — handing `emit` the float32 out of `pend_vel` instead of the
+    unrounded double local. This needs no reachability argument; it is a pure bound. The
+    store `v->pend_vel[slot] = (float)vel;` runs two lines above, so the mutant's argument
+    is exactly `(double)(float)vel`, and `emit` consumes `vel` twice: `fire_vel[n] =
+    (float)vel` is **bit-identical** under the mutant because float→double→float
+    round-trips exactly, so the fire record the rack actually plays does not move by one
+    bit; and `last_vel = vel`, meter index 4, one of the four tolerance-gated fields. That
+    is the only observable difference, and it is the float32 narrowing error of a value
+    bounded by 1 — `velocityFrom` returns `vel_min + (1 - vel_min) * c` with `vel_min`
+    clamped to `[0, 0.95]` and `c` to `[0, 1]` — hence at most 2⁻²⁴ ≈ 5.96e-8 absolute,
+    and `relErr`'s denominator is `max(1, |a|, |b|) = 1`. A factor of 33 under the gate.
+    Tightening index 4 to exact equality would be a **false gate**: it descends from a
+    float32 IIR through `20*log10()`, which is precisely what `f1da024` declined to hold.
+    Replaced with **`s1-emit-vel-floor`**, which emits the velocity *floor* instead of the
+    computed velocity and probes the same argument for the right reason.
+  - `s1-nan-arm` — writing the raw envelopes instead of exact zeros in stage 1's
+    `total > 1e-12` false arm. **This one produced the port's only comment correction.** The
+    source claimed the arm was what stops a NaN envelope becoming a NaN feature vector, and
+    that is over-claimed: `onset.c`'s per-sample `const double s = isfinite(x) ? (double)x
+    : 0.0;` means a non-finite sample never reaches the band filters at all, the biquads
+    `bk_sanitize` their own state, and every parameter setter early-returns on `!isfinite`.
+    The envelopes are therefore always finite and the NaN leg is unreachable **by
+    construction, upstream, in a different file.** That was confirmed empirically rather
+    than merely argued: two rows were added at `block_size` 4096 with `n` 32768, which puts
+    the poison NaN on the first sample of block 1 while a slot detected in block 0 is read
+    by stage 1 *in* block 1 — the tightest alignment the stream allows — and the mutant
+    still escaped. Had the envelope been NaN there, `band` would have gone NaN, classify
+    would have returned -1, and `emit`'s assert would have aborted the producer loudly. The
+    reachable leg is then bounded: entering the arm *requires* each envelope in `[0, 1e-6]`,
+    so the mutant perturbs three float32 outputs by at most 1e-6 against a 2e-6 gate, and
+    the knock-on through classify shifts squared distances by ~1e-12 — a tie that close
+    exists nowhere in the roster. Replaced with **`s1-nan-arm-one`**, a materially different
+    write to the same arm, which the rows that reach it now catch outright. The two poison
+    rows were kept: they are the evidence for the corrected comment.
+
+Four more replacements came from the earlier passes of the same triage:
+
+  - `s1-axes` — widening stage 1's 3 axes to `FEATURE_COUNT` adds
+    `(band[3] - attack[cls*4+3])² * AXIS_WEIGHT[3]`, and both operands are unconditionally
+    `+0.0f`: `band[3] = 0.0f` is a straight-line store below both arms of the guard, and
+    the attack table's fourth column is `0.0f` for all four classes with its only writer
+    rejecting `b > 2` outright — the zcr slot of the attack table is not addressable from
+    the API. `d` accumulates only non-negative terms, so `d += 0.0` is bit-exact identity.
+    Replaced with **`s1-axes-two`**, a narrowing that drops the high-band axis.
+  - `emit-pad-unguarded` — dropping the bounds test in front of `class_pad` cannot be
+    anything but an escape in this build: the line above is the `assert`, the battery
+    compiles without `NDEBUG`, and the producer is the only caller, so the condition is
+    true on every reachable input and false only where the assert aborts both producers
+    first. The guard exists for the `NDEBUG` build, where it reproduces what the JS does
+    with `classPad[-1]`. Replaced with **`emit-pad-index`**, a permutation of the index that
+    the `pad-poke` rows observe.
+  - `pr-cap-attack` — capturing the attack vector from `last_band` instead of
+    `pend_band[slot]` is equivalent for two independent reasons: a hit closes the previous
+    hit's feature window, so at most one slot is pending-unread when the next block's
+    stage-1 pass runs; and the drain loop walks ids upward, so a slot read inside the loop
+    was registered in the current block and its id exceeds anything the pass read — the
+    pass-read slots are captured first, while the pass's write to `last_band` is still the
+    newest. Replaced with **two** reachable mutants of the same statement,
+    `pr-cap-attack-slot` (wrong pending row) and `pr-cap-attack-order` (right row, reversed).
+
+The 107 mutants are spread across the module by area: `process` 25, `control` 15, `stage1`
+13, `reset` 10, `init` 9, `defaults` 8, `classify` 8, `emit` 5, `profile` 4, `capture` 4,
+`hazard1` 4, `meters` 2.
+
+**One process note from this module, and it is about tooling rather than DSP.** The triage
+ran two instruments: a fast one that patches, builds native only, and byte-diffs the
+producer dump against pristine, and the slow one that patches and runs the whole battery.
+They answer different questions — the first says *is this mutant reachable*, the second
+says *does a check fail* — and a `DIFFERS` from the first was at one point read as "caught",
+which is what let `s1-nan-arm` and `s1-emit-float-vel` look closed for a session while they
+were in fact reachable-but-inside-tolerance. A reachability probe is not a verdict. The two
+were also the only escapes in the module that the fast instrument could not have closed
+even in principle, because the hole was in the gate and not in the roster.
+
+Two caveats carry forward unchanged: **MSVC remains completely unmeasured** — the
+cross-toolchain agreement here is glibc versus emscripten on Linux/x86-64 only — and
+**bit-identity is empirical per module, not a guarantee.** `beat-classify` making the gate
+says nothing about `looper` making it.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -945,8 +1142,9 @@ nothing about `beat-classify` or `looper` making it.
     `drum-rack` (done, 224 checks green, 123/123 mutants caught) → `drum-synth` (done,
     1748 checks green, 155/155 mutants caught, no identity gate by design) → `onset`
     (done, 54 checks green, 166/166 mutants caught, bit-identical to the JS and baselined
-    anyway) → `beat-classify` → **`looper.js` last**, being the largest (925 lines) and
-    most stateful.
+    anyway) → `beat-classify` (done, 72 checks green over 100 cases, 107/107 mutants
+    caught, bit-identical to the JS on all five layers) → **`looper.js` last**, being the
+    largest (925 lines) and most stateful.
   - **`drum-synth` (done — see its writeup above for the result) is the first module
     deliberately ported without a JS-parity gate, and reading it is what forced the
     question.** 321 lines, six renderers, and it

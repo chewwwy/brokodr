@@ -167,13 +167,17 @@ export class FilePlayer {
       case "loop":
         this.loopEnabled = v >= 0.5;
         break;
+      // Loop points are whole frames. A fractional point made the wrapped read in
+      // #srcIndex land on a fractional index, and L[4814.4] is `undefined` — so every
+      // pass through a user-set region went silent for the wrapped part of the read.
+      // Found by the C port (2026-10-01), fixed in both at once.
       case "loopin": {
-        const f = clamp(v, 0, 1) * this.frames;
+        const f = Math.round(clamp(v, 0, 1) * this.frames);
         this.loopIn = Math.min(f, Math.max(0, this.loopOut - 128));
         break;
       }
       case "loopout": {
-        const f = clamp(v, 0, 1) * this.frames;
+        const f = Math.round(clamp(v, 0, 1) * this.frames);
         this.loopOut = Math.max(f, this.loopIn + 128);
         if (this.loopOut > this.frames) this.loopOut = this.frames;
         break;
@@ -229,7 +233,13 @@ export class FilePlayer {
       if (!this.loopEnabled) return -1;
       return a + ((idx - a) % len);
     }
-    if (idx < a) return this.loopEnabled ? b - ((a - idx) % len) : idx < 0 ? -1 : idx;
+    if (idx < a) {
+      if (!this.loopEnabled) return idx < 0 ? -1 : idx;
+      // A whole number of lengths back from `a` is `a`, not `b`: `b` is one past the
+      // region and, when the region runs to the end of the file, one past the buffer.
+      const back = (a - idx) % len;
+      return back === 0 ? a : b - back;
+    }
     return idx;
   }
 

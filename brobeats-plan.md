@@ -1391,8 +1391,18 @@ The 250 mutants cover:
 module's gate is its own `verify-*-parity.mjs`. The engine-level null/file driver is where
 the modules meet.
 
-**This closes Phase 5a's DSP port.** All twelve modules are in C, each with its own green
-battery and a mutation sweep with every escape closed. The same two caveats carry into 5b:
+**This closes the BroBeats core, not Phase 5a. Corrected 2026-10-01.** The first version of
+this paragraph claimed that the 5a DSP port was finished. It is not. The twelve core
+modules are now in C, each with a green battery and every mutant either caught or argued
+equivalent and replaced. But 5a's own scope is *all* of the DSP, plus a null driver that
+runs the real native engine. These are still JavaScript:
+
+  - the 22 effects in `dsp/effects/` (≈3,300 lines over 11 files, including the vocoder,
+    talkbox and `PitchFormant`);
+  - `file-player.js` (430 lines, the WSOLA stretcher and resampler the pads use);
+  - `engine.js` (755 lines, the host that composes everything).
+
+That is roughly as much code again as has been ported. The same two caveats carry into 5b:
 **MSVC is completely unmeasured**, and **bit-identity is empirical per module, not a
 guarantee**. `init-low` is the proof of the second caveat: one libm disagreed with V8 by
 one ulp, on one coefficient.
@@ -1414,7 +1424,10 @@ one ulp, on one coefficient.
     over 310 records, 53/53 mutants caught, bit-identical on both toolchains) → `looper`
     (done, last, being the largest at 925 lines and the most stateful: 183 checks green
     over 78 scripted cases, 250/250 mutants caught, 77/78 bit-identical to the JS and
-    78/78 across toolchains). **The Phase 5a DSP port is complete.**
+    78/78 across toolchains). **The core modules are done.** Phase 5a still owes
+    `file-player`, the 22 effects and `engine` (≈4,500 lines of JS, about as much as has
+    been ported), then the null-driver run of the composed native engine. Only after that
+    is 5a green and 5b unblocked.
   - **`drum-synth` (done — see its writeup above for the result) is the first module
     deliberately ported without a JS-parity gate, and reading it is what forced the
     question.** 321 lines, six renderers, and it
@@ -1563,11 +1576,18 @@ and it's why the device panel keeps a shared-mode option rather than forcing exc
 
 ---
 
-## Phase 6 — the glue: metronome, MIDI rescan, input routing, GPU visualiser
+## Phase 6 — the glue: metronome, MIDI rescan, input routing, visualiser polish, harmonizer
 
-Four things from your own use of the app. Two are missing features, one is a real bug in
-the *UI's honesty* rather than its maths, and one is the visualiser. Delivered as one
-phase, per your call.
+Five things from your own use of the app:
+
+  - two missing features (6a, 6b);
+  - one real bug in the *UI's honesty* rather than its maths (6c);
+  - a polish pass on the visualiser that is already there (6d);
+  - a new instrument in the chain, the harmonizer (6e).
+
+All five are delivered as one phase, per your call. **Amended 2026-10-01:** the WebGL
+visualiser that 6d used to be is dropped. 6d is now a canvas-2D polish pass, and the
+harmonizer takes the slot as the phase's big item.
 
 ### 6a — Metronome
 
@@ -1674,48 +1694,117 @@ folds to mono. So:
   preservation on `LEFT`/`RIGHT` vs `SUM`, and the detector firing on a synthetic
   one-sided input.
 
-### 6d — The visualiser: WebGL, 3 styles on a dial, full width
+### 6d — Visualiser polish: the existing panes, sexier, no WebGL
 
-Your reference images are GPU work — 3D bar matrices, Lissajous meshes, spectrogram
-terrain. Canvas 2D can't do them at frame rate. So: a new WebGL pane, **replacing** the
-current spectrum/scope pane, full width between the two VU meters, with a detented style
-dial. **Three styles to start** (dial built for 8 so adding more is a data change, not a
-rewrite):
+**Dropped 2026-10-01, your call:** the WebGL pane, its three 3D styles and the style dial.
+That also removes 6d's main risk: a GPU context competing with the audio callback, plus
+the fallback path that existed to manage it. What stays is the two panes that already
+work:
 
-1. **Spectrum terrain** — the scrolling 3D waterfall from your fifth image, and the one
-   that carries **proper reference axes**: log frequency (20Hz–20kHz, labelled) across,
-   dBFS labelled up the side, time receding. This is the "hunting a resonance" view, and
-   the one your "add reference numbers" note was really about. (Small correction: audio
-   spectrum is **Hz/kHz** — MHz would be radio.)
-2. **3D spectrum bars** — image one. A perspective grid of bars, colour-mapped by
-   magnitude, with a labelled frequency floor.
-3. **Lissajous mesh** — the cyan wireframe. Plots L against R, so it reads stereo width and
-   phase at a glance, and it is *the* view that would have made 6c obvious instantly: a
-   mono-on-one-channel signal draws a flat diagonal line instead of a field. Genuinely
-   useful, not just pretty.
+  - `ScopeStrip` "vu": the two analogue VUs either side of the triggered oscilloscope;
+  - `SpectrumStrip` "spectrum": waveform over a log-frequency spectrum.
 
-- **`components/visualiser/`** — one `gl-pane.tsx` owning the context, one module per
-  style, sharing the existing `pollScope` and `readSpectrum` transports. No new DSP and no
-  SAB layout change; the data is already there.
-- **The scope ring is currently mono** — `worklet-processor.js` sums `(inL+inR)*0.5` into a
-  single ring, so style 3 needs a genuine stereo scope. That means widening the scope ring
-  to two channels (append-only, additive to the SAB layout) — the one DSP-side change in
-  6d, and the reason it isn't free.
+Both are canvas 2D, and both get a look pass. **No new DSP and no change to the SAB
+layout.** Everything below draws from the `pollScope` and `readSpectrum` data that already
+exists.
 
-**The risk worth stating: a greedy visualiser can cause audio dropouts.** GPU work on the
-main thread competes with the audio callback's scheduling, and this app's whole point is
-not glitching. So: a hard frame budget, `requestAnimationFrame` throttling to 30fps when
-the CPU meter climbs, automatic suspend when the pane isn't visible, and a **graceful
-fall back to the current canvas 2D pane** if WebGL is unavailable or the context is lost —
-which also keeps the web build working on machines with no GPU acceleration.
+  - **Phosphor persistence on the scope.** The trace is drawn into an offscreen canvas
+    that is faded by a fraction each frame instead of being cleared. Steady signals burn
+    in bright and transients leave a decaying tail, which is what a real CRT does. Add a
+    soft glow: one wide, low-alpha stroke under the sharp one, and **not** `shadowBlur`,
+    which is the expensive canvas-2D path.
+  - **A proper CRT glass.** A vignette, faint scanlines and a cached graticule, rendered
+    once per resize rather than per frame. A per-division scale readout goes in the corner
+    (`0.25 / div`, and `ms / div` from the sample rate).
+  - **The spectrum gets its reference numbers.** This was the real ask behind the old 6d.
+    Frequency labels move from three lines to the full decade set (20, 50, 100, 200, 500,
+    1k, 2k, 5k, 10k, 20k). A labelled dBFS axis goes up the side. A hover crosshair reads
+    out the frequency and level under the cursor, for hunting a resonance.
+  - **Spectrum fill as a gradient.** The fill runs from the band colour at the trace down
+    to transparent, with a peak-hold trace that has real hold-then-fall ballistics. Today
+    it is a constant 0.6 dB a frame.
+  - **Optional, your call: a 2D goniometer** (L against R) as a third mode. It is
+    cheap in canvas 2D at 1024 points, and it is the one useful idea in the old Lissajous
+    style: a mono-on-one-channel signal draws a line, not a field. The catch is that it
+    needs the scope ring widened to stereo. Today the worklet sums `(inL+inR)*0.5` into one
+    ring. That change is additive to the SAB layout, but it is a DSP-side change, so it is
+    listed separately.
+
+**Frame budget:** 30 fps when the CPU meter climbs, and drawing suspended when the pane is
+not visible. That rule carries over from the old 6d unchanged, because canvas 2D on the
+main thread can still starve the UI if it is careless.
+
+### 6e — Harmonizer: an H3000-style pitch shifter in the chain
+
+**Spec (from your answers):** "just like the Eventide H3000". That means up to 4 harmony
+voices, user-configurable, real-time with low latency for live vocal monitoring. If
+bit-identity breaks, we decide then.
+
+**The approach is decided by the latency, not by taste.** A phase vocoder (what the
+existing `PitchFormant` uses, at FFT 1024) sounds cleaner but needs a long analysis
+window, and the window *is* the latency. The H3000 reached roughly 10 ms with
+**time-domain splicing**: two read heads crossfading through a short delay line, with the
+splice points chosen to land on matching waveform phase. The artefacts of that approach
+are what people now call "the H3000 sound". So copying the approach is both the only
+low-latency route and the way to get the character.
+
+**What it is, built in two stages so the risky part is heard early:**
+
+  - **Stage 1: one fixed-interval voice, end to end.** A splice shifter (±24 semitones plus
+    fine cents) on the existing `delay-line` core, with correlation-picked splice points.
+    It covers the params, the chain slot, the worklet and a UI card. The point of this
+    stage is that you hear the shifter's quality before anything is built on top of it.
+  - **Stage 2: the H3000 layer.**
+    - Up to 4 voices, each with its own interval, level, pan, delay (0–2 s) and a damping
+      low-pass.
+    - A feedback path per voice, which gives the cascading arpeggio effect.
+    - A **diatonic mode**: a pitch detector plus a key and scale picker, so each voice
+      shifts by a scale degree rather than a fixed number of semitones.
+    - Factory presets.
+    - The pitch detector should start from the vocoder's autocorrelation tracker (its
+      `PITCH FOLLOW`), not from scratch.
+
+**Under route (c) it is written in C first.** There is no JS reference. By Phase 6, the 22
+effects and the engine are in C and the demo runs the wasm build. Writing a JavaScript
+version first only to port it would be throwaway work. That changes what the battery can
+assert. There is no V8 oracle, so it is behavioural:
+
+  - pitch accuracy on known sines and sawtooths at every interval;
+  - **measured latency**, asserted under a ceiling;
+  - voice count and level;
+  - feedback that decays and never runs away;
+  - splice clicks below a set threshold;
+  - no NaN and no denormal stall;
+  - the same output at every block size;
+  - native against wasm across toolchains.
+
+The battery is mutation-tested like everything else.
+
+**Scope: about 13–23 sessions**, against roughly 4 for `drum-rack`. This is the earlier
+15–26 estimate less the C-port line, since there is now no JS to port from.
+
+  - Stage 1 is about 5–7 sessions.
+  - Stage 2 is about 8–16 sessions.
+  - **Two risks dominate.**
+    - **The pitch detector on real vocals.** This is the hardest DSP in the app, and it is
+      judged by ear.
+    - **Splice tuning.** Making it sound like an H3000 rather than a broken granular
+      stretch is ear work, and no test says when it is done.
+
+  Quote it in two stages: Stage 2 gets a real estimate once Stage 1 has been heard.
 
 ### Order within the phase
 
-6c (scope fix — **done**) → 6c (input routing) → 6b → 6a → 6d. Diagnostics first because
-they're small and they're costing you real time right now; the metronome next because it's
-self-contained; the visualiser last because it's the largest and the only one that can
-destabilise something that currently works. That's build order only — you asked for all
-four delivered together, so nothing ships piecemeal unless you say otherwise.
+6c (scope fix — **done**) → 6c (input routing) → 6b → 6a → 6d → 6e.
+
+  - Diagnostics go first because they are small and are costing you real time right now.
+  - The metronome is next because it is self-contained.
+  - The visualiser polish follows; it is small now that WebGL is gone.
+  - The harmonizer goes last because it is by far the largest item and the only one that
+    adds new DSP. Its Stage 1 checkpoint is a deliberate stop for your ears.
+
+That is build order only. You asked for all of it delivered together, so nothing ships
+piecemeal unless you say otherwise.
 
 ### Decisions — settled
 
@@ -1723,6 +1812,11 @@ four delivered together, so nothing ships piecemeal unless you say otherwise.
   accent on beat 1.
 - **Click routing:** switchable, **default phones-only** — never in the main out, never in
   a recording, never in a loop take, never past the Smart Voice detector tap.
+- **Visualiser (2026-10-01):** WebGL **dropped**. The existing canvas-2D panes get a
+  polish pass instead (6d). The stereo goniometer is optional and is still your call.
+- **Harmonizer (2026-10-01):** added to the chain as 6e. It is H3000-style time-domain
+  splicing with up to 4 voices at low latency, written in C first, and built in two stages
+  with a listening checkpoint between them.
 - **Mic on input 2** — so the input selector defaults to `RIGHT` on this rig. Confirmed that
   the default is cosmetic: every channel stays reachable from the dropdown, so the default
   only decides what you see on first launch, not what you're stuck with.

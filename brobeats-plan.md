@@ -1130,6 +1130,273 @@ cross-toolchain agreement here is glibc versus emscripten on Linux/x86-64 only �
 **bit-identity is empirical per module, not a guarantee.** `beat-classify` making the gate
 says nothing about `looper` making it.
 
+#### `clock` — the transport, and a NaN that answered the wrong question
+
+`bk_clock` is the transport the looper reads to quantise punches and to keep tempo-locked
+loops phase-aligned, which made it the last dependency `looper` needed. It is small (the
+JS is a few dozen lines of arithmetic), but it is where tempo turns into frame counts, so
+every rounding and every guard in it becomes a looper decision one module later.
+
+**310 records, 57 asserted checks green, 53/53 mutants caught, and all 310
+are bit-identical to `clock.js` under both `cc` and `emcc`, and identical between the two
+toolchains.** `clock`'s only libm calls are `floor` and `fmod`, and both are exactly
+rounded, so unlike `looper` there was no transcendental to drift. The records cover:
+
+  - the constructor at every sample rate the app can meet, plus the degenerate ones;
+  - every setter across its clamp boundaries and all three non-finite inputs;
+  - the grid sweep, which is every integer bpm from 20 to 300 × 11 quantise choices × 4
+    rates;
+  - `framesToGrid` anchored to real grid multiples out past 2^52;
+  - 600-block `advance` runs with scripted stop, restart and reset;
+  - `barPhase` out to 2^53;
+  - six scripted sequences that travel as their own params.
+
+**The battery caught two things the first port got wrong. Both were NaN, and neither was
+cosmetic.**
+
+  - **`framesToGrid` guarded with `!(g > 0.0)` instead of the JS's literal `g <= 0`.**
+    These are not the same test. A NaN grid is reachable: `setParam("bpm", NaN)` makes
+    `frames_per_beat` NaN, and the grid with it. The inverted form answers 0, which means
+    "act immediately". The JS answers NaN, and in the looper `pendingAt = frame + NaN` is
+    a punch that never fires. That is a different decision downstream, not a tidier guard.
+    The C now spells the JS's comparison literally.
+  - **`beats_per_bar` was an `int` field.** The JS holds a Number, and `clamp()` is a
+    ternary that passes NaN straight through, so storing it in an int needed `(int)NaN`.
+    That is undefined behaviour in C, and it really does differ between x86 (INT_MIN) and
+    wasm (0). The field is now a `double`, like `frame`, for the same reason.
+
+**Three mutants are proven equivalent, and each was replaced on the same line by one the
+battery catches:**
+
+  - **`js_round` → `round()`.** `floor(x + 0.5)` and `round()` disagree only on negative
+    halves. All three call sites swallow a negative result: `recalc_grid` and
+    `frames_for_beats` floor at 1, the `beats_per_bar` setter clamps to [1, 16], and a
+    negative half rounds to ≤ 0 either way. Replaced by `nearbyint`, which differs on
+    positive halves.
+  - **The constructor's grid line → `recalc_grid(c)`.** `bk_clock_init` sets
+    `quantize = 4.0` two lines above, so `recalc_grid`'s `quantize > 0` test is statically
+    true and the two are the same expression. Replaced by three mutants on the init line
+    itself.
+  - **`clamp(round(v))` → `round(clamp(v))` for `beats_per_bar`.** Both bounds are integers
+    and rounding is monotonic, so the two compose identically for every input including
+    NaN and ±Inf. Replaced by the clamp-dropped mutant.
+
+The `param-keys` generator work that `BK_CLOCK_P_*` and `BK_LOOP_P_*` needed was folded
+into the same commit.
+
+#### `looper` — the last module, and the one where NaN, `||` and signed zero all mattered
+
+864 lines of C against a 364-line header, a 1522-line script-VM producer and a
+1310-line verifier, porting the 925-line `looper.js`. **78 scripted cases,
+183 asserted checks green, 250/250 swept mutants caught,** plus 13 more argued
+equivalent, each replaced by a caught mutant on the same line. It was the
+largest and most stateful module, which is why it went last.
+
+**The battery is a script VM rather than a fixed vector list.** Each case is a flat array
+of six-wide ops (record, play, stop, undo, clear, a track or looper param, a clock param,
+an advance, a chain insert, process N blocks of M frames from a given source with a given
+prefill, and probes for state, snapshot, meters, buffers and queries). The same script
+runs through `looper.c` (native and wasm) and through `looper.js`, and every probe is
+compared field by field. Scripts are data, so a new edge case costs a few lines and not a
+new harness.
+
+**Identity: 77/78 cases are bit-identical to the JS on both toolchains, and
+78/78 are identical between native and wasm.** These are pinned as floors, so a
+drop fails the run. The one case that is not identical is `init-low`, which runs at 2 kHz.
+The play smoother's coefficient there is `exp(-1 / (3 × 0.001 × 2000))`, and V8's
+`Math.exp` rounds it one ulp below glibc's (`0.846481724890614` against `…6141`). All 8
+differing values are that one `playA` snapshot field (4 tracks × 2 snapshots, 1.1e-16
+each). The float32 audio is bit-identical anyway. This is the first module where a libm
+transcendental showed up in a record at all, and it is exactly the kind of drift
+`f1da024` declined to gate on.
+
+**The port got four things wrong, and the battery caught all of them.** Each one is a place
+where a literal C reading of the JS is a different program:
+
+  - **`o.maxSeconds || 30` is a falsiness test, not a default.** 0 and NaN take the default.
+    A *negative* value survives the `||`, and then `max(2048, round(neg × sr))` floors it
+    at 2048 frames. `js_or_seconds()` spells this out.
+  - **`o.tracks || 4` is the same trap.** Only 0 takes the default. A negative count
+    survives, and the constructor's loop then builds no tracks at all. The C is
+    `tracks == 0 ? 4 : (tracks < 0 ? 0 : tracks)`, and `init` separately refuses anything
+    above the 4 the struct holds.
+  - **`setParam("source", NaN)` was undefined behaviour.** In the JS,
+    `clamp(Math.round(NaN), 0, 1)` is NaN, and `(int)NaN` in C is UB (INT_MIN on x86, 0 on
+    wasm). NaN compares unequal to `DRUMS` in the render's only test of the field, so the
+    JS behaves as `MASTER`, and the C now stores `MASTER`. The `.mjs` maps a NaN `source`
+    to `MASTER` when it snapshots the JS side, and says so.
+  - **`bk_clock_frames_to_grid`'s NaN guard is what makes "a punch that never fires"
+    reproducible.** With a live grid but a NaN clock frame, `pendingAt = NaN + NaN`, and
+    `frame >= NaN` never holds. That fix landed in `clock` (see its section above), but
+    `nan-params` is the case that proves the looper consumes it correctly. Its sibling
+    proves the other half: a NaN *grid* fails `grid > 0`, so the punch is immediate.
+
+**The always-live buffer argument (looper.h note 1) is proven, not asserted.** The JS
+allocates a track buffer on first arm and the undo slot on first overdub. The C has them
+from `init`. Three pairs of cases render identically against each other:
+
+  - `arm-never`, `arm-cleared` and `arm-undo` cover buffers;
+  - `chain-never`, `chain-empty` and `chain-live` cover the lazy chain (note 2).
+
+Both comparisons are on audio, buffers and snapshots, and the snapshot comparison reports
+the differing field.
+
+**Sample-accurate punches are checked across block sizes.** `block-256` and `block-64`
+are the same quantised performance at two block sizes. Audio, frame for frame, and the
+final snapshot are identical. The final state is identical too, except the meters: they
+are the peak of the *last block*, so they depend on block size by design.
+
+**Harness holes the sanity section caught on its own scripts.** Four of the first
+`sanity` failures were the battery being wrong, not the port. Each was fixed in the
+script, not by loosening the check:
+
+  - `quant-cancel` meant to show a different action *replacing* a pending one. But `PLAY`
+    on a playing track schedules STOP, so `STOP, PLAY` was the same action twice, which
+    *cancels*. It now uses `STOP, REC`, and checks that the pending action changed while
+    `pendingAt` stayed put.
+  - In `idle`, `FREE_TAKE` ends with the play gain still at 0, because `begin_take` reset
+    it and no block had played since. The following `STOP` had nothing to fade. Four
+    blocks are now played first, so the fade is real and is observed as audible, then
+    idle 40 blocks later.
+  - `BK_CLOCK_P_BEATS_PER_BAR` was never sent by any script.
+  - One `nan-params` check read the wrong snapshot index.
+
+gcov then found one real hole: an overdub punched in and out with no frame in between.
+`end_overdub` runs with `last_write == -1`, so the declick is skipped. `overdub-instant`
+now covers it, and turned up a nice detail along the way. Undo then redo of an empty layer
+leaves the loop numerically unchanged but *not* bit-identical, because the redo computes
+`-0 + 0 = +0`, and the declick ramp's first sample of a take is a signed zero. That is IEEE
+behaviour, the JS does the same, and the check asserts it rather than tolerating it.
+
+**Branches gcov reports as never taken, and why each one is unreachable:**
+
+  - **Every NULL-buffer guard** (`!t->buf_l`, `!lp->undo_l`, `&& buf_l` in the render, and
+    their kin). Buffers are always live (note 1).
+  - **`bk_chain_init` failing inside `init`.** Its four refusals (NULL chain, NULL wet,
+    `max_block <= 0`, too many slots) are pre-checked by `init` itself or constant, so
+    with `init` intact the branch cannot be taken. It is not dead weight, though: it is a
+    second line behind `init`'s own checks. That is exactly why two first-sweep mutants
+    (`init: max_block <= 0 -> < 0` and `init: chain_wet_r unchecked`) were equivalent.
+    Loosen one of `init`'s checks and the chain refuses the same input, so `init` still
+    returns -1. Both were replaced (see below).
+  - **`value > 1e-4` in `audible`, and the matching `<= 1e-4` in the idle test.** A track
+    that is not playing always has `play_gain.target == 0`. Every transition to
+    EMPTY/REC/STOPPED sets or resets the target to 0, the undo-take redo inherits the 0 the
+    undo set (or that `begin_take` reset, if a new take was started in between), and a non-playing track that renders gets `want_gain` 0. "Settled" means
+    `value == target`, so settled and not playing implies a value of exactly 0.
+  - **`undo_mode == NONE` while `undo_track` names the track.** `undo_track == -1` holds
+    exactly when the mode is `NONE`: the only writers are `init`/`drop_undo` (both) and
+    `close_take`/`begin_overdub` (both).
+  - **`n <= 0` in the layer undo.** In LAYER mode, `frames > 0` holds from `begin_overdub`
+    until `clear`, which drops the undo. `undo_frames = min(frames, max_frames) > 0`.
+  - **`undo_mode != LAYER` while `undo_armed`.** `armed` is only set alongside LAYER, and
+    is cleared by every path that changes the mode.
+  - **`idx < 0` in the REC declick.** `n <= rec_write`, so `idx = rec_write - 1 - k >= 0`.
+  - **The free-running `pos >= len` wrap at read time.** `t->pos ∈ [0, frames)` whenever
+    `frames > 0`. It is set to 0, wrapped by `%`, or advanced with a wrap. The one place
+    `frames` is restored (undo-take redo) restores the same length the position was valid
+    for.
+  - **`begin_play`/`begin_overdub` with `frames <= 0`, and `action != STOP` in the last arm
+    of `apply_action`.** Both are excluded by their only callers.
+
+**The mutation sweep found more than the parity runs did.** The first full sweep ran 248
+mutants and 34 survived. I argued 14 of them equivalent, and the other 20 were real holes
+in the battery. Fourteen new cases closed those holes:
+
+  - `pending-replaced`, `clear-pending`, `clear-all-4` and `reset-overdub`;
+  - `param-edges`, which covers every clamp edge and every `>= 0.5` threshold at 0.5 and
+    just under;
+  - `steal-undo`, where a take closing on one track takes the undo slot from another
+    track's running overdub;
+  - `undo-take-rearm`, `sync-play`, `declick-short` and `init-hisr` (at 1.2 MHz the declick
+    is longer than the loop);
+  - `chain-empty-mix`, `silent-negzero`, `overdub-muted` and `rec-ramp-meter`.
+
+A second, targeted sweep then found two more holes:
+
+  - **`gain clamp -60 -> -61`.** `param-edges` sent -61 and then -60.5 with no snapshot in
+    between, so the second value hid the first. It now snapshots after each one.
+  - **`sounded ignored`.** This mutant turns `if (!sounded || lp->muted)` into
+    `if (lp->muted)`. The only observable difference is that a `-0` already in the output
+    becomes `+0`: with no track rendered, the sum loop adds `+0` to it. The generic JS
+    comparison is tolerance-based and cannot see a signed zero, so `silent-negzero`
+    prefills the output with `-0` and asserts `Object.is(x, -0)` on every sample.
+
+Writing this section turned up two of my own equivalence arguments that were wrong:
+
+  - **The claim:** `begin_take: rec_ramp kept` and `begin_overdub: rec_ramp kept` were
+    unobservable, because "every exit from REC/OVERDUB zeroes `rec_ramp`".
+  - **The path that breaks it:** undo a take, start a new one, then undo again. That
+    *redoes* the old take mid-recording: it restores the length and moves the track to
+    STOPPED, but nothing zeroes the new take's ramp. The next overdub, or after a third
+    undo the next take, then relies on its own reset.
+  - **The fix:** `redo-in-take` and `redo-in-take-2` drive that path, and both original
+    mutants are back in the sweep.
+
+That leaves 13 equivalence arguments. Every one of them has a same-shape
+replacement that the battery catches, so none of them is load-bearing. They are still my
+own written proofs and have not been independently checked.
+
+**Equivalent mutants (argued, not independently checked), each with its caught replacement:**
+
+  - **`audible: value > 1e-4` (and the idle test's `<= 1e-4`)** → `audible: unsettled test
+    dropped`, `idle: settled ignored`, `idle: playing ignored`. This uses the play-gain
+    target invariant above.
+  - **`init: max_block <= 0 -> < 0`** → `init: max_block <= 0 -> <= 1`. `bk_chain_init`
+    refuses `max_block == 0` itself. The replacement is caught by `init_check` variant 21,
+    which expects `max_block = 1` to be accepted.
+  - **`init: chain_wet_r unchecked`** → `init: chain_wet_r test inverted`. The chain refuses
+    a NULL `wet_r`.
+  - **`active: OVERDUB not active`** → `active: REC not active`. OVERDUB implies playing,
+    which implies audible, so the next line answers 1 anyway.
+  - **`undo layer: n uses frames only`** → `undo layer: n one short`. While a LAYER undo
+    belongs to a track, its `frames == undo_frames`.
+  - **`pan_l <= 0 -> < 0`** and **`pan_r >= 0 -> > 0`** → `<= 0.25` and `>= -0.25`, caught by
+    `param-edges`. At `±0`, `1 ∓ pan` is exactly 1.0.
+  - **`begin_take: layers kept`** → `begin_take: layers = 1`. Every way to `frames == 0`
+    leaves `layers == 0`.
+  - **`close_take: grid max clamp > -> >=`** → `grid max clamp floor -> ceil`, caught by
+    `grid-max`. At equality, `max_frames` is already a whole number of grid units.
+  - **`begin_overdub: frames gate dropped`** → `frames gate inverted`. Its only caller has
+    already tested `frames > 0`.
+  - **`begin_overdub: free pos not wrapped`** → `free pos reset to 0`. This uses the
+    `pos ∈ [0, frames)` invariant above.
+  - **`render: rec ramp < -> <=`** and **`render: overdub ramp < -> <=`** → `< d - 1`. At
+    `rec_ramp == d`, `d / d` is exactly 1.0, the other arm's value.
+
+The full proofs are kept with the sweep script.
+
+The 250 mutants cover:
+
+  - `init` and its argument refusals;
+  - the `||` fixes;
+  - scheduling (cancel vs replace, `running`/`sync`/grid tests, `pendingAt`);
+  - clear and undo, including the single-rounding `(float)((double)b - (double)u)`;
+  - every param's clamp and `>= 0.5` threshold;
+  - the balance pan law at both edges;
+  - the NaN source mapping;
+  - take length (grid rounding, both max clamps, the `MIN_LOOP_FRAMES` `<` boundary);
+  - the declick for REC and OVERDUB, including the read-before-write order on the undo
+    slot;
+  - meters;
+  - the idle test and solo logic;
+  - the chain path;
+  - the output sum and sanitise;
+  - the render (punch timing, `fmod` position fix-ups, ramps, the overdub undo residue,
+    free-running advance, `posNorm`).
+
+`clock.c` and `looper.c` are **not** wired into `test-core.cc` or
+`verify-native-core.mjs`. That follows the precedent of the ten modules before them:
+`test-core` covers the ring, the layout contract and the offline device, and each DSP
+module's gate is its own `verify-*-parity.mjs`. The engine-level null/file driver is where
+the modules meet.
+
+**This closes Phase 5a's DSP port.** All twelve modules are in C, each with its own green
+battery and a mutation sweep with every escape closed. The same two caveats carry into 5b:
+**MSVC is completely unmeasured**, and **bit-identity is empirical per module, not a
+guarantee**. `init-low` is the proof of the second caveat: one libm disagreed with V8 by
+one ulp, on one coefficient.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -1143,8 +1410,11 @@ says nothing about `looper` making it.
     1748 checks green, 155/155 mutants caught, no identity gate by design) → `onset`
     (done, 54 checks green, 166/166 mutants caught, bit-identical to the JS and baselined
     anyway) → `beat-classify` (done, 72 checks green over 100 cases, 107/107 mutants
-    caught, bit-identical to the JS on all five layers) → **`looper.js` last**, being the
-    largest (925 lines) and most stateful.
+    caught, bit-identical to the JS on all five layers) → `clock` (done, 57 checks green
+    over 310 records, 53/53 mutants caught, bit-identical on both toolchains) → `looper`
+    (done, last, being the largest at 925 lines and the most stateful: 183 checks green
+    over 78 scripted cases, 250/250 mutants caught, 77/78 bit-identical to the JS and
+    78/78 across toolchains). **The Phase 5a DSP port is complete.**
   - **`drum-synth` (done — see its writeup above for the result) is the first module
     deliberately ported without a JS-parity gate, and reading it is what forced the
     question.** 321 lines, six renderers, and it

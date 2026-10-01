@@ -432,11 +432,11 @@ affect a pixel.
    *reports* the bit-identity separately, so a future toolchain that diverges slightly
    fails only if it diverges audibly.
 
-#### Two real bugs the port has already surfaced
+#### Three real bugs the port has already surfaced
 
 The port is not just a translation exercise — running the JS and the C side by side over an
-edge-value battery has already found two genuine defects. Both are worth recording because
-one is a bug class to keep watching for, and the other is a bug in the shipping app.
+edge-value battery has already found three genuine defects. All are worth recording: one
+is a bug class to keep watching for, and the other two are bugs in the shipping app.
 
 1. **The `Math.max` / `Math.min` NaN trap (bug class, in the C port, fixed).** JS
    `Math.max(x, k)` **propagates NaN**; the obvious C translation `x > k ? x : k` does not
@@ -462,6 +462,19 @@ one is a bug class to keep watching for, and the other is a bug in the shipping 
    **behaviour change, so it is deliberately out of scope for the port** — it must land in
    both implementations at once, with the parity battery updated in the same commit, or the
    two engines will drift. Tracked as its own item, not folded into Phase 5.
+3. **<a id="fp-loop-frac"></a>Fractional loop points silenced the file player (a real bug
+   in the shipping JS, fixed in `0bfa1ef`, 2026-10-01).** `loopin` / `loopout` were stored as
+   `fraction × frames` without rounding, so a loop of 0.1003–0.2007 had fractional ends.
+   The wrapped read index (`a + (idx - a) % len` forward, `b - (a - idx) % len` back) was
+   then fractional too, and `L[4814.4]` is `undefined`. The output went silent and NaN entered the FIFO. For that
+   loop, a scratch repro showed 13,715 exact-zero samples and 268 NaN; after the fix it
+   shows 0 and 0. The fix rounds both loop points to whole frames (`Math.round`, so the C
+   needed a correct `js_round`, see the `file-player` section), and a wrap-back of a whole
+   number of region lengths now lands on loop-in, not on `b`, which is one past the
+   region (and one past the buffer when the region runs to the end of the file). Unlike `PITCH-OCTAVE`, it
+   was fixed in the JS first and before the C was compared against it: a silent,
+   NaN-producing read is not behaviour worth preserving. `node scripts/verify-dsp.mjs` was
+   307/307 after the fix.
 
 Every harness is validated by mutation rather than trusted for passing — `biquad` with
 three deliberate breakages, `delay-line` with six, `fft` with eight. The `biquad` three,
@@ -1399,13 +1412,116 @@ runs the real native engine. These are still JavaScript:
 
   - the 22 effects in `dsp/effects/` (≈3,300 lines over 11 files, including the vocoder,
     talkbox and `PitchFormant`);
-  - `file-player.js` (430 lines, the WSOLA stretcher and resampler the pads use);
+  - ~~`file-player.js`~~ (440 lines, the WSOLA stretcher and resampler the pads use).
+    Ported since; see the next section;
   - `engine.js` (755 lines, the host that composes everything).
 
 That is roughly as much code again as has been ported. The same two caveats carry into 5b:
 **MSVC is completely unmeasured**, and **bit-identity is empirical per module, not a
 guarantee**. `init-low` is the proof of the second caveat: one libm disagreed with V8 by
 one ulp, on one coefficient.
+
+#### `file-player` — the WSOLA stretcher, and the bug it found in the shipping app
+
+406 lines of C against a 131-line header, a 576-line script-VM battery and a 497-line
+verifier, porting the 440-line `file-player.js` (the WSOLA time-stretch, the cubic
+resampler and the FIFO between them, which the pads and the file deck use). **65 scripted
+cases, 95 asserted checks green, 196/196 swept mutants caught,** plus 18 more argued
+equivalent, each replaced by a caught mutant of the same shape on the same line. It is the
+first 5a module after the core, per the approved order (`file-player` → the effects →
+`engine` → the null driver).
+
+**Identity: 65/65 cases are bit-identical to the JS on native and on wasm, and 65/65
+across toolchains,** pinned as floors. That includes the sign of every zero: the shared
+`maxAbs` comparator treats -0 and +0 as equal, so the verifier adds its own pass that
+compares every record with `Object.is` (native vs JS, wasm vs JS, native vs wasm). Without
+it, the -0 rules in `Math.min`/`Math.max` were untestable. The only transcendentals are
+`cos` (once, at init, for the grain window) and `pow` (on a level change). Everything in
+the audio path is either exact (`floor`, `ceil`, `trunc`, `fabs`, `fmod`) or correctly
+rounded by IEEE 754 (`sqrt`). So identity here is less fragile than in `looper`, but it is
+still empirical, and MSVC is still unmeasured.
+
+**The JS semantics the obvious C gets wrong, all spelled out in `file-player.c`:**
+
+  - **`Math.round` is not `floor(x + 0.5)`.** The addition rounds, so 0.49999999999999994
+    goes up. `js_round` compares the exact fraction `x - floor(x)` instead.
+  - **`Math.min`/`Math.max` have two rules, not one.** NaN propagates, and -0 is less than
+    +0. `bk_min`/`bk_max` only have the first. Here a -0 loop point gets through `clamp`
+    and reaches the playhead, so the module has local `js_min`/`js_max` rather than a
+    change to `utils.c` that would reopen twelve green batteries. `js_min`'s -0 rule is
+    reachable (a file shorter than 128 frames gives `Math.min(-0, +0)`), and
+    `s_negzero_short` catches both of its mutants. `js_max`'s rule is not reachable at
+    any of its four call sites (argued in the sweep).
+  - **`x & FIFO_MASK` is `ToInt32` first.** The counters are doubles, and `(int)NaN` is UB
+    that differs between x86 and wasm. `fifo_index` takes a fast cast in [-2^31, 2^31), and
+    otherwise does the spec's exact modulo-2^32, with NaN and inf going to 0. `s_counters31`,
+    `s_counters32`, `s_counters64`, `s_counters_neg`, `s_counters_frac` and
+    `s_ola_nonfinite` plant the counters directly at the edges.
+  - **A typed-array read out of range is `undefined`, which is NaN once it meets
+    arithmetic.** `src_at` returns NaN for anything out of range or non-integer, and the
+    sanitiser keeps it out of the speaker.
+
+**The battery is a script VM like `looper`'s,** with five-wide ops: buffer (choice of
+stimulus per channel, length and rate), param, process N blocks of M, snapshot, reset,
+clear, re-init, a direct counter override (`COUNTERS`, for 2^31/2^32/2^63 without
+playing for days), and `SCALE`, which edits the borrowed source in place (for `s_quiet`
+and `s_zero_patch`). The source buffer carries a sentinel one past the end, so an
+out-of-bounds read shows up in the output. Each process records 12 block-state fields
+(return value, meter, position, `src_pos`, the three counters, `ended`, `playing`, the
+gain smoother's value and target, `active`), and each snapshot records 11 more.
+
+**What the mutation sweep found.** The first full sweep left 47 of 191 mutants alive. 28
+of them pointed at holes in the battery, and 16 new scripts closed those holes: edges,
+re-buffering mid-play and after the end, region replays, settled stops, loop hops,
+fractional seeks, long one-shots, quiet and zero-patched sources, and NaN loop-out at the
+end. Two were caught only after a second look:
+
+  - `fill: identity band <=` (edge 1.0011e-3). The first `s_alpha_edge` used speed
+    1.00105, and |alpha - 1| = 1.05e-3 is *outside* that gap, so the mutant survived. The
+    script now uses 1.0010005 and 0.9989995. Note that the plain `<` / `<=` choice at 1e-3
+    itself is not a real mutant: |alpha - 1| is a multiple of 2^-53 for alpha in [0.5, 2],
+    and `double(1e-3)` is an odd multiple of 2^-60, so they can never be equal.
+  - `process: underrun >= write -> >= write + 1`. Instrumenting the clamp showed only one
+    fractional overshoot in the whole battery, in `s_impulse`, where the FIFO is all zeros
+    at that point, so it could not show. `s_underrun_frac` runs a one-shot RAMP off the end
+    inside 512-frame blocks at a non-integer r > 1 (file at 50 kHz, then pitch +3) while
+    the gain is still up and the FIFO past the write head holds stale non-zero frames. That
+    gives 9 fractional overshoots, and the mutant dies.
+
+**gcov, after the sweep: 100% of lines, 94% of branches taken.** Coverage found one more
+hole: the battery had never sent PLAY while already playing, or a stop while stopped. No
+mutant had been written for either, so the sweep could not notice. `s_play_twice` now
+covers both, including a stop after the auto-stop that must not stop the next PLAY
+replaying from the region start. `s_loop_nan_cross` covers the two NaN loop-point
+orderings that had never been sent. Four new mutants are all caught. What gcov still
+reports as never taken is exactly the set argued unreachable below, plus `init`'s NULL
+guard, and `wrap_pos`'s `len <= 0`, which is the same invariant as `src_index`'s.
+
+**Equivalent mutants (argued, each with a caught same-shape replacement):**
+
+  - `js_max`'s two -0 mutants: none of the four call sites can tie at zero.
+  - `fifo_index` modulo 2^31: 2^31 and 2^32 are both multiples of 8192. The replacement
+    uses 2^32 - 4096.
+  - `fifo_index` fast path narrowed to `>= 0`: the slow path is itself an exact `ToInt32`.
+  - `src_at`'s integer test: every index that reaches it is an integer or NaN.
+  - `active` ignoring `loaded`: unloaded implies not playing and the gain settled at 0.
+  - Two loop-point clamps (`loopin` top 2, `loopout` bottom -1): these rely on `frames >= 0`,
+    which is now written into `set_buffer`'s contract in the header.
+  - Four `src_index` mutants: the pre-region branch not looping, `<= a`, and `len <= 0`
+    against `< 0`. The loop-point invariants keep `len > 0` whenever a process can reach
+    it.
+  - Two grain-loop `break`/`continue` swaps: a -1 is monotone in the index.
+  - The early-out tail: settled is exact equality, so a settled gain of 0 is 0.
+  - The meter `>=`: the cubic of any non-finite tap is NaN, never inf, because every tap
+    has opposite-sign coefficients in c2 and c3. That was brute-forced over 20,480 tap and
+    phase combinations.
+  - The underrun `>`: neither counter can be -0 through the API.
+  - Auto-stop while looping: looping never sets `ended`.
+  - The span floor: `frames >= 1` past the loaded check.
+
+These arguments are mine and have not been independently checked. Each one is written out
+in full in the sweep script, which, like the earlier modules' sweep scripts, is not in the
+repo. Each one's replacement mutant is caught.
 
 #### What (c) means for the remaining port
 
@@ -1424,10 +1540,12 @@ one ulp, on one coefficient.
     over 310 records, 53/53 mutants caught, bit-identical on both toolchains) → `looper`
     (done, last, being the largest at 925 lines and the most stateful: 183 checks green
     over 78 scripted cases, 250/250 mutants caught, 77/78 bit-identical to the JS and
-    78/78 across toolchains). **The core modules are done.** Phase 5a still owes
-    `file-player`, the 22 effects and `engine` (≈4,500 lines of JS, about as much as has
-    been ported), then the null-driver run of the composed native engine. Only after that
-    is 5a green and 5b unblocked.
+    78/78 across toolchains). **The core modules are done.** Then `file-player` (done,
+    first of 5a's remaining modules: 95 checks green over 63 scripted cases, 192/192
+    mutants caught plus 18 argued equivalent and replaced, 63/63 bit-identical to the JS
+    and across toolchains, signed zeros included). Phase 5a still owes the 22 effects and
+    `engine` (≈4,050 lines of JS), then the null-driver run of the composed native engine.
+    Only after that is 5a green and 5b unblocked.
   - **`drum-synth` (done — see its writeup above for the result) is the first module
     deliberately ported without a JS-parity gate, and reading it is what forced the
     question.** 321 lines, six renderers, and it

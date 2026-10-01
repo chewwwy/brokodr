@@ -396,4 +396,20 @@ enum {
   BK_CLOCK_P_COUNT = 5
 };
 
+/*
+ * File-player params (OP.FILE). FILE_FIELD.ROUTE is not here: it says where
+ * the player's output goes, which is the engine's business, not the player's.
+ */
+enum {
+  BK_FILE_P_PLAY = 0,
+  BK_FILE_P_SEEK = 1,
+  BK_FILE_P_LOOP = 2,
+  BK_FILE_P_LOOP_IN = 3,
+  BK_FILE_P_LOOP_OUT = 4,
+  BK_FILE_P_SPEED = 5,
+  BK_FILE_P_PITCH = 6,
+  BK_FILE_P_GAIN = 7,
+  BK_FILE_P_COUNT = 8
+};
+
 #endif /* BROKODR_DSP_PARAM_KEYS_H */

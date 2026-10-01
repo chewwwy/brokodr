@@ -42,7 +42,7 @@ if (typeof Bun === "undefined") {
 }
 
 const { EFFECTS } = await import(SCHEMA);
-const { PAD_KEY, DRUM_KEY, LOOP_KEY, LOOPER_KEY, CLOCK_KEY } = await import(BACKEND);
+const { PAD_KEY, DRUM_KEY, LOOP_KEY, LOOPER_KEY, CLOCK_KEY, FILE_FIELD } = await import(BACKEND);
 
 /*
  * The drum pads do not live in EFFECTS. A pad is not a chain slot: its params
@@ -83,6 +83,36 @@ for (const [name, authoritative] of [
         `  worklet: ${mirror.join(", ")}`,
     );
     process.exit(2);
+  }
+}
+
+/*
+ * The file player's fields. backend.ts holds them as an object (FILE_FIELD),
+ * and the worklet holds two copies: the same object, and FILE_KEY, the string
+ * each numeric field becomes before FilePlayer.setParam sees it. ROUTE is an
+ * engine-level field (where the player's output goes), not a player param, so
+ * it is excluded from the player's keys — and it must be the LAST field, or a
+ * player key would sit above it and the index-to-string mapping would skip.
+ */
+{
+  const m = workletSrc.match(/const FILE_FIELD = \{([^}]*)\}/);
+  const wf = m ? Object.fromEntries([...m[1].matchAll(/([A-Z_]+):\s*(\d+)/g)].map((x) => [x[1], Number(x[2])])) : null;
+  const want = Object.entries(FILE_FIELD);
+  if (!wf || JSON.stringify(Object.entries(wf)) !== JSON.stringify(want)) {
+    console.error(`FILE_FIELD disagrees between ${REL_BACKEND} and ${REL_WORKLET}`);
+    process.exit(2);
+  }
+  const fileKey = workletCopy("FILE_KEY");
+  const playerFields = want.filter(([k]) => k !== "ROUTE");
+  if (FILE_FIELD.ROUTE !== playerFields.length || !fileKey || fileKey.length !== playerFields.length) {
+    console.error(`FILE_FIELD.ROUTE must be last and FILE_KEY must name every other field (${REL_WORKLET})`);
+    process.exit(2);
+  }
+  for (const [k, v] of playerFields) {
+    if (fileKey[v] !== k.toLowerCase().replace(/_/g, "")) {
+      console.error(`FILE_KEY[${v}] is "${fileKey[v]}" but FILE_FIELD names it ${k} (${REL_WORKLET})`);
+      process.exit(2);
+    }
   }
 }
 
@@ -198,6 +228,18 @@ for (let i = 0; i < CLOCK_KEY.length; i++) w(`  BK_CLOCK_P_${screaming(CLOCK_KEY
 w(`  BK_CLOCK_P_COUNT = ${CLOCK_KEY.length}`);
 w("};");
 w();
+w("/*");
+w(" * File-player params (OP.FILE). FILE_FIELD.ROUTE is not here: it says where");
+w(" * the player's output goes, which is the engine's business, not the player's.");
+w(" */");
+w("enum {");
+{
+  const fields = Object.entries(FILE_FIELD).filter(([k]) => k !== "ROUTE");
+  for (const [k, v] of fields) w(`  BK_FILE_P_${k} = ${v},`);
+  w(`  BK_FILE_P_COUNT = ${fields.length}`);
+}
+w("};");
+w();
 w("#endif /* BROKODR_DSP_PARAM_KEYS_H */");
 
 const out = lines.join("\n") + "\n";
@@ -218,7 +260,7 @@ if (process.argv.includes("--check")) {
     `param-keys.h is up to date — ${types.length} effect types, ${total} params, ` +
       `${PAD_KEY.length} pad params, ${DRUM_KEY.length} rack params, ` +
       `${LOOP_KEY.length} loop params, ${LOOPER_KEY.length} looper params, ` +
-      `${CLOCK_KEY.length} clock params`,
+      `${CLOCK_KEY.length} clock params, ${Object.keys(FILE_FIELD).length - 1} file params`,
   );
 } else {
   writeFileSync(OUT, out);
@@ -226,6 +268,6 @@ if (process.argv.includes("--check")) {
     `wrote ${OUT} — ${types.length} effect types, ${total} params, ` +
       `${PAD_KEY.length} pad params, ${DRUM_KEY.length} rack params, ` +
       `${LOOP_KEY.length} loop params, ${LOOPER_KEY.length} looper params, ` +
-      `${CLOCK_KEY.length} clock params`,
+      `${CLOCK_KEY.length} clock params, ${Object.keys(FILE_FIELD).length - 1} file params`,
   );
 }

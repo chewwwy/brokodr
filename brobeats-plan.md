@@ -1523,6 +1523,64 @@ one ulp, on one coefficient.
   latency; it starts saying "WASAPI exclusive, 128 frames, 5.3 ms" instead of explaining
   why it can't.
 
+**5c — VST3 plugin. Added 2026-10-01, your call.** It is a third target built from the
+same C core. The `.exe` stays the product, and the VST3 is the same rack loaded inside a
+DAW.
+
+**Where it sits, and why: after 5b, before Phase 6.**
+
+  - **It needs all of 5a.** A plugin is the chain plus every effect, running in C, so it
+    cannot start before the effects and `engine` are ported.
+  - **It does not need 5b's device layer.** The DAW owns the audio device, so the WASAPI
+    and ASIO work is irrelevant to it.
+  - **It needs 5b's toolchain.** A Windows VST3 is an MSVC (or mingw) DLL. 5b is where the
+    Windows build is first measured, so the plugin follows rather than doubling up on an
+    unproven toolchain.
+  - **It goes before Phase 6** so the harmonizer (6e) lands in all three targets at once.
+    Parameter IDs are frozen here, and 6e appends to them instead of renumbering.
+
+**How it is built:**
+
+  - **Steinberg VST 3 SDK, directly, not JUCE.** The SDK has been MIT-licensed since 3.8
+    (October 2025), so there are no fees and no redistribution problem. JUCE 8 is either
+    AGPLv3 or a paid tier above $20k revenue. More to the point, it would bring a second
+    DSP framework that the C core does not need.
+  - **Audio:** a stereo-in, stereo-out effect bus. `process()` calls the same
+    `bk_chain` / engine entry points the null driver and the `.exe` use, with no allocation
+    on the audio thread. The host's block size varies, so the core's same-output-at-every-
+    block-size property, which is already in every battery, is what makes this safe.
+  - **Parameters:** each entry in `param-schema.ts` maps to a VST3 parameter with a
+    **stable ID derived from its schema position**. The schema is append-only already, so
+    host automation lanes survive updates.
+  - **State:** the plugin's state chunk is the same preset JSON the app saves, so a preset
+    moves between the `.exe` and the DAW unchanged.
+  - **Latency reporting:** the plugin reports the chain's total lookahead to the host for
+    delay compensation. This matters most for the harmonizer.
+  - **GUI:** the existing React UI, hosted in a WebView (WebView2 on Windows) inside the
+    plugin window. It talks to the C core over a message bridge shaped like the existing
+    `NativeBridge` contract, so the UI code does not fork. First there is a fallback with
+    no custom GUI: the host's generic parameter view. That lets the audio side be validated
+    before the WebView work starts.
+  - **v1 scope: the rack as an effect.** The 22 modules and the master chain, with the
+    harmonizer added when 6e lands. **Not in v1:** the BroBeats drum rack as a
+    MIDI-instrument plugin, and looper sync to the host transport. Both are possible, since
+    VST3 gives MIDI input and the host tempo, but each is its own item. They stay parked
+    until you ask.
+
+**Verification:**
+
+  - **Here, on Linux:** build the Linux VST3 and run it through Steinberg's `validator`
+    (shipped with the SDK) and `pluginval` at strictness 5. Then render known WAVs through
+    the plugin in an offline host and compare them against the null-driver baseline of the
+    same chain. That is a real, end-to-end check on this platform.
+  - **On your machine only:** the Windows `.vst3` loading in Ableton or FL, the WebView2
+    GUI inside a real host window, and real-time behaviour. **MSVC is still completely
+    unmeasured**, and some hosts are known to misbehave with WebView2 plugin windows.
+
+**Scope: about 6–10 sessions.** That breaks down as SDK scaffold, parameters and state
+(2–3), Linux validation and render parity (1–2), and the WebView GUI bridge (3–5). The
+Windows-host iteration is extra and done blind, like 5b.
+
 ### What you actually get
 
 | | now | WASAPI exclusive | ASIO |
@@ -1569,8 +1627,11 @@ and it's why the device panel keeps a shared-mode option rather than forcing exc
   green. Corollary: the planned `?dsp=js` runtime fallback is **dropped** rather than
   built, because a second reachable sound engine is a second engine to maintain and it was
   only ever hedging the demo.
-- **Order:** Phase 5 first, then Phase 6. Within Phase 5, **all of 5a with the null-driver
-  parity harness green before any Windows work starts.** It's tempting to chase the device
+- **VST3 (2026-10-01):** added as **5c**, after 5b and before Phase 6. It uses the
+  Steinberg VST 3 SDK (MIT), not JUCE. v1 is the rack as a stereo effect with a WebView GUI.
+  The drum-rack instrument and host-transport looper sync are parked.
+- **Order:** Phase 5 first (5a → 5b → 5c), then Phase 6. Within Phase 5, **all of 5a with
+  the null-driver parity harness green before any Windows work starts.** It's tempting to chase the device
   layer first because that's where the payoff is, but a port validated only by ear is how
   you ship subtle DSP bugs into the thing that was previously verified 307 ways.
 
@@ -1723,12 +1784,12 @@ exists.
   - **Spectrum fill as a gradient.** The fill runs from the band colour at the trace down
     to transparent, with a peak-hold trace that has real hold-then-fall ballistics. Today
     it is a constant 0.6 dB a frame.
-  - **Optional, your call: a 2D goniometer** (L against R) as a third mode. It is
+  - **Approved 2026-10-01: a 2D goniometer** (L against R) as a third mode. It is
     cheap in canvas 2D at 1024 points, and it is the one useful idea in the old Lissajous
     style: a mono-on-one-channel signal draws a line, not a field. The catch is that it
     needs the scope ring widened to stereo. Today the worklet sums `(inL+inR)*0.5` into one
-    ring. That change is additive to the SAB layout, but it is a DSP-side change, so it is
-    listed separately.
+    ring. That change is additive to the SAB layout, but it is a DSP-side change, and the
+    only exception to "no new DSP" above.
 
 **Frame budget:** 30 fps when the CPU meter climbs, and drawing suspended when the pane is
 not visible. That rule carries over from the old 6d unchanged, because canvas 2D on the
@@ -1813,10 +1874,12 @@ piecemeal unless you say otherwise.
 - **Click routing:** switchable, **default phones-only** — never in the main out, never in
   a recording, never in a loop take, never past the Smart Voice detector tap.
 - **Visualiser (2026-10-01):** WebGL **dropped**. The existing canvas-2D panes get a
-  polish pass instead (6d). The stereo goniometer is optional and is still your call.
+  polish pass instead (6d). **The polish list is approved as written, and the stereo
+  goniometer is in**, which includes widening the scope ring to stereo on the DSP side.
 - **Harmonizer (2026-10-01):** added to the chain as 6e. It is H3000-style time-domain
   splicing with up to 4 voices at low latency, written in C first, and built in two stages
-  with a listening checkpoint between them.
+  with a listening checkpoint between them. **C first with no JS reference and a behavioural
+  battery: approved 2026-10-01.**
 - **Mic on input 2** — so the input selector defaults to `RIGHT` on this rig. Confirmed that
   the default is cosmetic: every channel stays reachable from the dropdown, so the default
   only decides what you see on first launch, not what you're stuck with.
@@ -1843,6 +1906,17 @@ reordered), `audio/engine-client.ts`, `pages/index.tsx` (section switch: RACK / 
 
 **Untouched**: all 22 existing effects, the vocoder, the VU meters, the metal skin. This adds
 a section; it doesn't disturb the rack.
+
+**Phase 6 additions (amended 2026-10-01)**: 6d touches `components/oscilloscope.tsx` and
+`components/meters.tsx` (canvas 2D), plus the scope ring for the approved goniometer. That
+ring change is a stereo widening, additive to the SAB layout, in the C engine and the
+worklet host. 6e adds the harmonizer as a new C module under
+`packages/native/src/dsp/` with its params appended to `param-schema.ts`, a chain slot and
+a UI card. The "untouched" line above is about BroBeats; Phase 6 does touch the VU pane.
+
+**Phase 5c (2026-10-01)**: a new `packages/vst3/`. It holds the SDK glue, the parameter
+mapping generated from `param-schema.ts`, the state chunk and the WebView host. It links
+the same `packages/native/src/dsp/` C core and adds no DSP of its own.
 
 ---
 

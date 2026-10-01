@@ -1747,7 +1747,10 @@ and it's why the device panel keeps a shared-mode option rather than forcing exc
   only ever hedging the demo.
 - **VST3 (2026-10-01):** added as **5c**, after 5b and before Phase 6. It uses the
   Steinberg VST 3 SDK (MIT), not JUCE. v1 is the rack as a stereo effect with a WebView GUI.
-  The drum-rack instrument and host-transport looper sync are parked.
+  The drum-rack instrument and host-transport looper sync are parked. **The 5c specifics
+  (SDK not JUCE, WebView2 GUI, IDs from `param-schema.ts`, preset JSON as state, rack-as-
+  effect v1, 6–10 sessions) were proposed by me and accepted by you on 2026-10-01 with no
+  changes.**
 - **Order:** Phase 5 first (5a → 5b → 5c), then Phase 6. Within Phase 5, **all of 5a with
   the null-driver parity harness green before any Windows work starts.** It's tempting to chase the device
   layer first because that's where the payoff is, but a port validated only by ear is how

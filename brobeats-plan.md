@@ -1580,6 +1580,88 @@ the two new records.
 These arguments are mine and have not been independently checked; each is written out
 in full in the sweep script, which is not in the repo.
 
+#### `drive` — effects 2-4 of 22 (Distortion, Saturation, BitCrusher)
+
+346 lines of C against a 161-line header, a 686-line script-VM battery and a 652-line
+verifier, porting the 274-line `effects/drive.js`: `DriveBase` (Distortion `dist` and
+Saturation `sat`, one struct `bk_drive`: pre-HP → six shapers, optionally 4x
+oversampled → DC blocker → tone filter → output gain, plus a peak meter) and `BitCrusher`
+(`crush`: sample-and-hold decimation, mid-tread quantisation, TPDF dither, optional
+anti-alias lowpass). **50 scripted cases, 156 asserted checks green, 230/230 swept
+mutants caught,** plus 5 argued equivalent, each replaced by a caught mutant of the same
+shape. gcov: 100% of 255 lines, 100% of 80 branches taken, 100% of 98 calls. They plug
+into the chain through `bk_drive_vt` (meter, no carrier bus, no latency) and
+`bk_crush_vt` (no meter). `utils.h` gains `bk_random_fn`, the callback that stands in for
+`Math.random`; all 15 `verify-*-parity.mjs` scripts were re-run green after that edit.
+
+**Identity is NOT total, and the shortfall is pinned.** 48/50 cases are bit-identical to
+the JS on native, 40/50 on wasm, 41/50 across toolchains, all pinned (with the `Object.is`
+pass for signed zeros). Every case is inside tolerance. One native drift is traced:
+`s_shape` hits glibc's `sin(3.04)`, one ulp off V8's. **`s_reset` and the wasm drifts
+are not traced record by record.** What was measured: over 200000 inputs in [-4, 4],
+glibc and V8 disagree on `exp` for 20292, `sin` for 6740 and `tanh` for 63, the three libm
+calls the shapers make. Three records are required bit-identical by name, not just
+counted. `s_fold_edge` and `x_shape_huge` only run the foldback, whose ops are all
+correctly rounded in IEEE 754 (`fmod` included), so identity there is guaranteed.
+`s_diode_tiny` relies on `exp(±tiny)` being exactly 1, which is empirical. MSVC is
+unmeasured.
+
+**Deliberate divergences, documented in `drive.h` and replayed against a JS contract
+copy (the `x_*` scripts):**
+
+  - A NaN `curve` makes every JS block throw a TypeError, killing the effect. Here it is
+    ignored. The verifier checks that the shipping JS really throws.
+  - The foldback loop costs |y| / 3.2 iterations and never ends on inf. Beyond |y| > 4096
+    (`BK_DRIVE_FOLD_LIMIT`) the C uses a closed-form fmod triangle, measured within 7.9e-8
+    of the loop. The verifier runs the contract first because the shipping JS hangs.
+  - `frames > max_block`: the JS reads past its arrays (NaN everywhere). Here the call is
+    processed in chunks, and the meter is the peak over the whole call.
+  - `max_block` below 1: the JS makes empty arrays, or throws a RangeError (checked).
+    Here it is 1.
+  - `Math.random` is a `bk_random_fn` callback. The battery installs an xorshift32 that
+    the JS mirrors, and it mirrors the crusher's internal fallback generator too.
+
+**What the mutation sweep found.** The first sweep left 18 of 230 alive (one mutant hung
+the runner, which now kills the process group after 40 s). Thirteen pointed at holes in
+the battery, closed by nine new scripts:
+
+  - The fold-limit and closed-form wrap edges only move the last bits (1e-10 down to
+    2e-16, inside tolerance). `s_fold_edge` and two `x_shape_huge` inputs that make `fmod`
+    return +0 and -0 catch them through the required identity.
+  - The diode's `1 - exp` form vs `expm1`: caught by `s_diode_tiny`'s tiny inputs and
+    signed zero.
+  - The oversampler's rate: caught by `s_huge_sr`, a 3e307 Hz sample rate, where 4x is
+    finite and 8x is not.
+  - Aliased buffers (`process(l, l)`, a mono caller): caught by a new `OP_MONO` and
+    `s_alias`.
+  - Crusher:
+    - The random callback's user pointer: the test generator now keeps its state there.
+    - A reset that keeps the right hold: caught by `c_reset_hold`.
+    - `pow(2, bits)` vs `exp2`: `c_bits_pow` uses a bits value where glibc's two differ
+      and V8 agrees with `pow`.
+    - The dither scale's double rounding at subnormals: caught by `c_dither_sub`.
+    - The anti-alias gate at 0.0005 and at exactly 0.001, snapped: caught by
+      `c_aa_gate`.
+    - A phase that rounds to exactly 2.0: caught by `c_phase2`.
+
+The pinned baselines moved by the nine new records natively; on wasm by eight, because
+`c_bits_pow` drifts there by construction (musl's `pow(2, x)` at that x is not glibc's or
+V8's).
+
+**Equivalent mutants (argued, each with a caught same-shape replacement):**
+
+  - Fold loop sign test `y > 0` → `y >= 0`: it is only evaluated where |y| > 0.8.
+  - Closed-form half test `p < 2t` → `p <= 2t`: `p == 2t` would need `y + 0.8` to be an
+    odd multiple of 2t's odd 52-bit mantissa, which no double above 4096 is.
+  - Soft tube `x >= 0` → `x > 0`: at ±0 both slopes give `tanh(±0)`.
+  - Meter `Math.max` → `fmax`, and meter `>` → `>= || NaN`: NaN reaches the meter only
+    through the output gain or the tone filter's b0. Both are shared by the two channels
+    and fixed for the whole block, so a block is all-NaN or NaN-free, and the chunk loop's
+    `p > peak` drops an all-NaN block either way.
+
+These arguments are mine and have not been independently checked; each is written out
+in full in the sweep script, which is not in the repo.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -1603,8 +1685,12 @@ in full in the sweep script, which is not in the repo.
     and across toolchains, signed zeros included) → `eq` (done, first of the 22 effects:
     74 checks green over 38 scripted cases, 164/164 mutants caught plus 3 argued
     equivalent and replaced, 34/38 bit-identical to the JS on native and 33/38 on wasm,
-    pinned, every case within tolerance). Phase 5a still owes the other 21 effects and
-    `engine` (≈3,870 lines of JS), then the null-driver run of the composed native engine.
+    pinned, every case within tolerance) → `drive` (done, effects 2-4 of 22: Distortion,
+    Saturation, BitCrusher: 156 checks green over 50 scripted cases, 230/230 mutants
+    caught plus 5 argued equivalent and replaced, 48/50 bit-identical to the JS on native
+    and 40/50 on wasm, pinned, every case within tolerance). Phase 5a still owes the other
+    19 effects and `engine` (3,502 lines of JS: seven effect files plus `engine.js`), then
+    the null-driver run of the composed native engine.
     Only after that is 5a green and 5b unblocked.
   - **`drum-synth` (done — see its writeup above for the result) is the first module
     deliberately ported without a JS-parity gate, and reading it is what forced the

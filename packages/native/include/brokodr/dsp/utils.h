@@ -197,6 +197,11 @@ double bk_pink_noise_next(bk_pink_noise *p);
 void bk_rng_seed(unsigned int *state, unsigned int seed);
 double bk_rng_bipolar(unsigned int *state);
 
+/* A stand-in for Math.random(): returns [0, 1). Effects that draw per sample
+   (where passing the sample in, as above, does not fit) take one of these, so
+   a parity battery can install a generator it mirrors in JS. */
+typedef double (*bk_random_fn)(void *user);
+
 #ifdef __cplusplus
 }
 #endif

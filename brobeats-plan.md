@@ -1523,6 +1523,63 @@ These arguments are mine and have not been independently checked. Each one is wr
 in full in the sweep script, which, like the earlier modules' sweep scripts, is not in the
 repo. Each one's replacement mutant is caught.
 
+#### `eq` — the first of the 22 effects
+
+201 lines of C against a 105-line header, a 484-line script-VM battery and a 326-line
+verifier, porting the 181-line `effects/eq.js` (HP cascade → low shelf → three peaks →
+high shelf → LP cascade, a control-rate smoother per param, an audio-rate output gain,
+and the 160-point curve display). **38 scripted cases, 74 asserted checks green, 164/164
+swept mutants caught,** plus 3 argued equivalent, each replaced by a caught mutant of the
+same shape. gcov: 100% of 128 lines, 100% of 34 branches taken. It plugs into the chain
+through `bk_eq_vt` (`process`, `reset`, `set_param`; no carrier bus, no latency, no meter).
+
+**Identity is NOT total here, and the shortfall is pinned, not hidden.** 34/38 cases are
+bit-identical to the JS on native, 33/38 on wasm, 33/38 across toolchains, all pinned as
+baselines (including an `Object.is` pass for signed zeros). Every case is inside the
+-120 dBFS tolerance. Native's float32 payload (audio and curve) is bit-identical to the
+JS on all 38; its drift is only in the double-precision coefficient fields (worst
+1.2e-14). Wasm's worst is 2.1e-12 on coefficients and 1.9e-9 (-174 dBFS) on audio, in
+`s_step`. The native drift was traced: the smoothed inputs to `bk_biquad_set` were
+bit-identical, and a standalone probe put the 1-ulp coefficient moves on glibc's `cos`
+at two mid-glide frequencies, where V8 and emscripten agree with each other. **The wasm
+drift was not traced.** emscripten matching V8 at those two inputs does not explain its
+own five drifting records. Coefficients are recomputed with `cos` every block while a
+param glides, so expect the same kind of pinned shortfall in the other filter-based
+effects. MSVC is unmeasured.
+
+**The JS semantics reproduced, spelled out in `eq.h` and `eq.c`:**
+
+  - The HP-off (`<= 21`) and LP-off (`>= 19900`) tests read the raw param, not the
+    smoothed one, so a filter switches off mid-glide.
+  - Slope stages are `1 + Math.round(clamp(slope, 0, 3))`, using `js_round` (the exact-
+    fraction rule from `file-player`), and a NaN slope runs no stages, because `i < NaN`
+    is false in the JS.
+  - Smoothers advance in the JS order, and the output smoother last.
+  - The curve re-renders only when dirty; `reset` does not mark it dirty, so the curve
+    keeps the first block's coefficients after a set_param.
+  - `max_block` 0 means 128, and anything below 1 means 1.
+
+**What the mutation sweep found.** The first full sweep left 9 of 164 alive. Six pointed
+at holes in the battery: no reset ever ran with the HP cascade, low shelf, third peak or
+high shelf carrying state (they were off or at 0 dB), none ran with the output gain off
+unity, and nothing tested that an unknown key (`BK_P_EQ_COUNT`, the off-by-one edge) must
+not mark the curve dirty. Two new scripts close them: `s_reset_every` and
+`s_unknown_dirty`. Both are bit-identical everywhere, so the baselines moved by exactly
+the two new records.
+
+**Equivalent mutants (argued, each with a caught same-shape replacement):**
+
+  - Slope clamp top 3 → 4: the cascade caps active stages at its count of 4, so both give
+    4 for any slope >= 3. Replacement: clamp bottom -1.
+  - Reset smoothers to `target` instead of `p[k]`: `sm[k].target == p[k]` is an invariant
+    (every writer of either sets both with the same value). Replacement: reset to the
+    current value.
+  - Curve rendered from channel 1: both channels' coefficients are written only by loops
+    with identical arguments. Replacement: coefficients updated for channel 1 only.
+
+These arguments are mine and have not been independently checked; each is written out
+in full in the sweep script, which is not in the repo.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -1541,10 +1598,13 @@ repo. Each one's replacement mutant is caught.
     (done, last, being the largest at 925 lines and the most stateful: 183 checks green
     over 78 scripted cases, 250/250 mutants caught, 77/78 bit-identical to the JS and
     78/78 across toolchains). **The core modules are done.** Then `file-player` (done,
-    first of 5a's remaining modules: 95 checks green over 63 scripted cases, 192/192
-    mutants caught plus 18 argued equivalent and replaced, 63/63 bit-identical to the JS
-    and across toolchains, signed zeros included). Phase 5a still owes the 22 effects and
-    `engine` (≈4,050 lines of JS), then the null-driver run of the composed native engine.
+    first of 5a's remaining modules: 95 checks green over 65 scripted cases, 196/196
+    mutants caught plus 18 argued equivalent and replaced, 65/65 bit-identical to the JS
+    and across toolchains, signed zeros included) → `eq` (done, first of the 22 effects:
+    74 checks green over 38 scripted cases, 164/164 mutants caught plus 3 argued
+    equivalent and replaced, 34/38 bit-identical to the JS on native and 33/38 on wasm,
+    pinned, every case within tolerance). Phase 5a still owes the other 21 effects and
+    `engine` (≈3,870 lines of JS), then the null-driver run of the composed native engine.
     Only after that is 5a green and 5b unblocked.
   - **`drum-synth` (done — see its writeup above for the result) is the first module
     deliberately ported without a JS-parity gate, and reading it is what forced the

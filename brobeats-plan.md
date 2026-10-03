@@ -1678,9 +1678,12 @@ than `n` in magnitude.
 tolerance. Every glitch and noise record is bit-identical on all three; all the drift is in Character
 records. **It is attributed to libm, not traced record by record.** Measured over 200,000 inputs: glibc
 `tanh` differs from V8 on 79 and emscripten's on 25,765; emscripten's `pow(10, x)` differs on 123 and
-glibc's on 0. Five records are required bit-identical by name, not just counted: the squelch threshold
-edge, the negative glitch index, and the three new edge scripts below. A sixth, the wobble gate edge, is
-required on native only, because it runs through emscripten's `tanh`. MSVC is unmeasured.
+glibc's on 0. Eight records are required bit-identical by name, not just counted (`REQUIRE_IDENTICAL`
+in the verifier). Five are required on native, on wasm and across toolchains: the squelch threshold edge
+(`h_squelch_edge`), the negative glitch index (`g_neg_index`) and three of the new scripts below
+(`g_reset_full`, `g_frac_rate`, `g_trig_edge`). Three Character records are required on native only:
+`h_wob_edge`, `h_crackle_edge` and `h_crackle_reset`; they drift on wasm, which is attributed to
+emscripten's `tanh` but not traced. MSVC is unmeasured.
 
 **Deliberate divergence, documented in `character.h`:** a NaN `mode` is ignored. In the JS,
 `MODES[NaN]` makes every block throw a TypeError. `x_mode_nan` replays this against a JS contract copy,
@@ -1756,7 +1759,7 @@ So: 354 of 369 caught, 11 argued equivalent, 4 accepted. Not 0 survivors.
     of 22: Character, Glitch, NoiseGen: 216 checks green over 62 scripted cases, 354/369
     mutants caught, 11 argued equivalent, 4 accepted survivors under the relaxed policy,
     50/62 bit-identical to the JS on native and 45/62 on wasm, pinned, every case within
-    tolerance). Phase 5a still owes the other 16 effects and `engine` (3,145 lines of JS:
+    tolerance). Phase 5a still owes the other 15 effects and `engine` (3,145 lines of JS:
     six effect files plus `engine.js`), then the null-driver run of the composed native
     engine.
     Only after that is 5a green and 5b unblocked.

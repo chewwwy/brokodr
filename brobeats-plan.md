@@ -1662,6 +1662,70 @@ V8's).
 These arguments are mine and have not been independently checked; each is written out
 in full in the sweep script, which is not in the repo.
 
+#### character
+
+**`character.js` → `packages/native/src/dsp/character.c` (459 lines, header 219), effects 5-7 of 22: Character
+(eight voice-character modes), Glitch (slice stutter) and NoiseGen.** 62 scripted cases, 216 asserted checks
+green. Each effect takes caller-owned storage sized by `bk_character_storage_floats(sr)` /
+`bk_glitch_storage_floats(sr)` (NoiseGen needs none) and a `bk_random_fn`, NULL meaning an internal xorshift
+the verifier mirrors. They plug into the chain through `bk_character_vt`, `bk_glitch_vt` (with a meter) and
+`bk_noise_gen_vt`. gcov: 100% of 324 lines, 100% of 118 calls, 111 of 112 branches taken. The one never
+taken is `idx < n` failing in the glitch buffer read, which cannot happen: `fmod(x, n)` is always smaller
+than `n` in magnitude.
+
+**Identity is NOT total, and the shortfall is pinned.** 50/62 cases are bit-identical to the JS on native,
+45/62 on wasm and 42/62 across toolchains, all pinned (signed zeros included). Every case is inside
+tolerance. Every glitch and noise record is bit-identical on all three; all the drift is in Character
+records. **It is attributed to libm, not traced record by record.** Measured over 200,000 inputs: glibc
+`tanh` differs from V8 on 79 and emscripten's on 25,765; emscripten's `pow(10, x)` differs on 123 and
+glibc's on 0. Five records are required bit-identical by name, not just counted: the squelch threshold
+edge, the negative glitch index, and the three new edge scripts below. A sixth, the wobble gate edge, is
+required on native only, because it runs through emscripten's `tanh`. MSVC is unmeasured.
+
+**Deliberate divergence, documented in `character.h`:** a NaN `mode` is ignored. In the JS,
+`MODES[NaN]` makes every block throw a TypeError. `x_mode_nan` replays this against a JS contract copy,
+and the verifier checks that the shipping JS really throws.
+
+**What the mutation sweep found.** The first sweep left 29 of 369 alive. 14 pointed at gaps in the
+battery, now closed:
+
+  - An undersized `bk_*_storage_floats()`. A canary after the declared size is checked after every block.
+  - Glitch init at a fractional sample rate (buffer `ceil`, crossfade `Math.round`). Added `g_frac_rate`
+    at 4500.3 Hz, which also reads the meter before the first block and sets fractional repeats.
+  - A reset that only half-clears, or leaves a slice playing: `g_reset_full`.
+  - Crackle at partial amount, and reset keeping the crackle state: `h_crackle_reset`.
+  - The two `<` probability tests at exact equality. `h_crackle_edge` and `g_trig_edge` set the
+    probability to exactly the first draw, 270369 / 2^32.
+  - The generator `init()` installs when `set_random` is never called: `h_init_internal`, via an `OP_INIT`
+    flag.
+
+**11 argued equivalent** (written out in the sweep script, which is not in the repo):
+
+  - `Math.round` vs C `round`: they differ only at negative halves, and every result is clamped from
+    below at 0 or 1.
+  - Wobble and flutter LFO order: they are independent objects.
+  - The wobble read's upper clamp: `read_cubic` clamps to `size-4` itself.
+  - `fmax` in the drive normaliser: a NaN drive already makes `x` NaN.
+  - The probability clamp: draws are in [0, 1).
+  - Two `case` fall-throughs into a `default` that only breaks.
+  - `buf_at` without an upper bound: the `fmod` bound above.
+  - The NoiseGen level floor under NaN: NaN × 0 = NaN × 1.
+  - Noise type `==` vs `<=`: type is always in {-0, 0, 1, 2, NaN}.
+
+Under the relaxed policy these were **not** given same-shape replacement mutants.
+
+**4 accepted survivors (relaxed policy):**
+
+  - `pow(2, x)` vs `exp2` for the glitch pitch: the same doubles on glibc and emscripten for every pitch
+    in the battery.
+  - Two rounding forms of the glitch lerp (`fma`, and `a*(1-t) + b*t`): under 1 ulp in double, which the
+    float output store absorbs.
+  - An out-of-range read returning 0 instead of NaN. This only shows when the index is exactly -1 with a
+    fractional read and `buf[0] != 0`. That happens for one frame after a mid-slice tempo cut, and the
+    battery does not engineer it.
+
+So: 354 of 369 caught, 11 argued equivalent, 4 accepted. Not 0 survivors.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -1688,9 +1752,13 @@ in full in the sweep script, which is not in the repo.
     pinned, every case within tolerance) → `drive` (done, effects 2-4 of 22: Distortion,
     Saturation, BitCrusher: 156 checks green over 50 scripted cases, 230/230 mutants
     caught plus 5 argued equivalent and replaced, 48/50 bit-identical to the JS on native
-    and 40/50 on wasm, pinned, every case within tolerance). Phase 5a still owes the other
-    19 effects and `engine` (3,502 lines of JS: seven effect files plus `engine.js`), then
-    the null-driver run of the composed native engine.
+    and 40/50 on wasm, pinned, every case within tolerance) → `character` (done, effects 5-7
+    of 22: Character, Glitch, NoiseGen: 216 checks green over 62 scripted cases, 354/369
+    mutants caught, 11 argued equivalent, 4 accepted survivors under the relaxed policy,
+    50/62 bit-identical to the JS on native and 45/62 on wasm, pinned, every case within
+    tolerance). Phase 5a still owes the other 16 effects and `engine` (3,145 lines of JS:
+    six effect files plus `engine.js`), then the null-driver run of the composed native
+    engine.
     Only after that is 5a green and 5b unblocked.
   - **`drum-synth` (done — see its writeup above for the result) is the first module
     deliberately ported without a JS-parity gate, and reading it is what forced the
@@ -1729,6 +1797,21 @@ in full in the sweep script, which is not in the repo.
     (binary stream format v3, plus the deterministic stimulus generator) and
     `scripts/lib/parity-stream.mjs` (the JS-side reader and comparators), so a new module
     costs a battery and a runner, not a new harness.
+  - **Mutation policy relaxed for simple effects — decided 2026-10-03 at the user's
+    request ("ok relax it"); the policy was taking about 40-50% of the effort.** This is
+    my reading of that, stated to the user:
+    - **Simple effects** (character/glitch/noise, the tremolo/ring-mod/chorus/flanger/
+      phaser/frequency-shifter family, and the dynamics processors) get a smaller,
+      targeted mutant set.
+    - A survivor may be **accepted** if it is listed by name in that module's writeup
+      with a reason.
+    - Argued-equivalent mutants no longer need a same-shape replacement mutant.
+    - "0 survivors" is still only claimed when it is true.
+    - **Complex modules keep the full policy:** every mutant caught on both toolchains,
+      and every equivalence claim proven, with a replacement. These are `reverb`
+      (`time.js`), `vocoder`, `talkbox`, `pitch`/formant (`spectral.js`) and `engine.js`.
+    - The caveats are unchanged: MSVC is unmeasured, and bit-identity is empirical per
+      module.
   - **JS parity is a porting aid, not a gate — decided 2026-09-15, and it narrows the
     remaining work.** The original framing had C canonical for *both* targets, which made
     "the wasm and the `.js` agree" a shipping requirement and put a bit-identity baseline

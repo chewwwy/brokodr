@@ -107,6 +107,16 @@ function delayAt(mode, base, i, n, size) {
 // ---------------------------------------------------------------------------
 
 const REF = {
+  "read.nonfinite"(rec) {
+    const d = new js.DelayLine(rec.params[0]);
+    for (let j = 0; j < 100; j++) d.write(j * 0.01);
+    const out = [];
+    for (let pass = 0; pass < 2; pass++) {
+      if (pass) d.clear();
+      for (const ask of [NaN, Infinity, -Infinity]) out.push(d.read(ask), d.readCubic(ask));
+    }
+    return { out64: Float64Array.from(out) };
+  },
   /** bk_delay_line_size vs the JS constructor's sizing rule. */
   size(rec) {
     const out = new Float64Array(rec.out64.length);
@@ -287,9 +297,9 @@ coefficientChecks(native, "native");
 // function; mutation testing on fft.js found exactly that hole. A drop here is
 // either a real change in the port or a change in libm (see the caveat in
 // brobeats-plan.md) — investigate, then re-baseline deliberately.
-const IDENTITY_NATIVE = 265;
-const IDENTITY_WASM = 267;
-const IDENTITY_CROSS = 267;
+const IDENTITY_NATIVE = 266;
+const IDENTITY_WASM = 268;
+const IDENTITY_CROSS = 268;
 
 compareToJs({
   name: "native",

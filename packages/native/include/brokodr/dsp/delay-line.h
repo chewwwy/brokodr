@@ -44,9 +44,10 @@ int bk_delay_line_size(double max_samples);
 void bk_delay_line_init(bk_delay_line *d, float *storage, double max_samples);
 void bk_delay_line_clear(bk_delay_line *d);
 void bk_delay_line_write(bk_delay_line *d, double x);
-/* Linear-interpolated read, delay in samples. */
+/* Linear-interpolated read, delay in samples. NaN returns NaN without an
+   integer cast; infinities clamp to the corresponding end of the range. */
 double bk_delay_line_read(const bk_delay_line *d, double delay_samples);
-/* 4-point Hermite read — clean under heavy modulation. */
+/* 4-point Hermite read — clean under heavy modulation. Same NaN/inf rule. */
 double bk_delay_line_read_cubic(const bk_delay_line *d, double delay_samples);
 
 /* --- Allpass ------------------------------------------------------------ */

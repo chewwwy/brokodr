@@ -184,6 +184,25 @@ int main(int argc, char **argv) {
           }
   }
 
+  /* Nonfinite read delays: infinities clamp; NaN must propagate without
+     an undefined double-to-int cast. Test after writes and after clear. */
+  {
+    bk_delay_line d;
+    double p[1] = {64.0};
+    const double asks[3] = {NAN, INFINITY, -INFINITY};
+    int k = 0, pass, j;
+    bk_delay_line_init(&d, storage, 64.0);
+    for (j = 0; j < 100; j++) bk_delay_line_write(&d, (double)j * 0.01);
+    for (pass = 0; pass < 2; pass++) {
+      if (pass) bk_delay_line_clear(&d);
+      for (j = 0; j < 3; j++) {
+        payload[k++] = bk_delay_line_read(&d, asks[j]);
+        payload[k++] = bk_delay_line_read_cubic(&d, asks[j]);
+      }
+    }
+    bk_parity_emit(f, "read.nonfinite", p, 1, payload, (unsigned int)k, NULL, 0);
+  }
+
   /* --- DelayLine: float32 rounding is visible --------------------------- */
 
   {

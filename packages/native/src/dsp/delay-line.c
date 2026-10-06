@@ -36,6 +36,9 @@ double bk_delay_line_read(const bk_delay_line *d, double delay_samples) {
   const int s = d->size;
   const double dl = bk_clamp(delay_samples, 0.0, (double)(s - 3));
   const double r = (double)d->w - 1.0 - dl;
+  /* JS indexes NaN as an absent property and returns NaN. Never cast it
+     to int: that is undefined, and cubic's i1-1 can also overflow. */
+  if (!isfinite(r)) return NAN;
   const int i0 = (int)floor(r);
   const double frac = r - (double)i0;
   /* C's % truncates toward zero exactly as JS's does, so the double-modulo
@@ -49,6 +52,7 @@ double bk_delay_line_read_cubic(const bk_delay_line *d, double delay_samples) {
   const int s = d->size;
   const double dl = bk_clamp(delay_samples, 1.0, (double)(s - 4));
   const double r = (double)d->w - 1.0 - dl;
+  if (!isfinite(r)) return NAN;
   const int i1 = (int)floor(r);
   const double frac = r - (double)i1;
   const double x0 = (double)d->buf[(((i1 - 1) % s) + s) % s];

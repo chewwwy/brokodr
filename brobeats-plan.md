@@ -1908,6 +1908,61 @@ full 138 were rerun on the final battery. gcov: 100% of 208 lines, 87/87 branch
 outcomes, 53/53 calls. ASan + UBSan + float-cast-overflow clean; sanitizer and
 coverage builds give the same values (`Object.is`) as -O2.
 
+#### time
+
+**`time.js` → `packages/native/src/dsp/time-fx.c` (284 lines, header 74), effects
+19–20 of 22: Delay and Reverb.** Named `time-fx` so the header can never shadow the C
+library `<time.h>`. Delay is a simple effect (relaxed mutation policy); Reverb, an
+8-line FDN with a Hadamard butterfly, predelay, allpass diffusion and per-line LFOs,
+is complex (full policy). Caller-owned structs and float delay storage, no
+allocation. Faithful quirks: Delay filters are recomputed at the top of every process
+call (frames <= 0 too) and keep the Biquad constructor state until the first one; sync
+uses `Math.round` and a NaN division selects free time; `fb_l`/`fb_r` are reset and never
+used; Reverb allpasses start at g = 0.5, not the reported diffusion 0.6, until a
+diffusion `set_param`; predelay writes before it reads, the FDN reads before it writes;
+every LFO advances each sample whatever the modulation threshold; the Hadamard
+butterfly rounds to float after each add/subtract and after the 1/sqrt(8)
+normalisation, as the `Float32Array` does; reset leaves smoothers, LFOs and the scratch
+alone. The JS `damp` and `mix` arrays are never read and have no C counterpart.
+
+50 opcode scripts (29 Delay, 20 Reverb, 1 mixed), 97 asserted checks green.
+
+**Identity measured on glibc / emscripten / V8, 2026-10-06: 44/50 native vs JS, 47/50
+wasm vs JS, 46/50 native vs wasm**, pinned with signed zeros, every out64 and out32
+value; every out32 buffer is identical. Drift: native/JS `d_mod d_combo d_rates
+r_default r_combo r_lfo_wrap`, wasm/JS `d_rates r_combo r_lfo_wrap`, native/wasm `d_mod
+d_combo r_default r_lfo_wrap`. Traced (Math.* wrapped, each argument re-evaluated with
+glibc and emscripten libm) on every drifting script except `d_combo`, which was **not**
+traced: `sin` is the only transcendental that differs from V8 (glibc 458–3454 arguments
+per script, emscripten 57–950); `cos`, `exp` and `pow` agree on every traced argument. The
+LFOs are sine, so the drift lands where they feed the delay read position.
+
+**Mutation sweep: 203 mutants, 196 caught, 7 survivors accepted with written
+arguments (mine, not machine checked); 3 same-site replacement mutants, all caught.**
+The first sweep (200 mutants) left 11 alive; four battery additions killed
+`dproc: read l max` (`d_tiny_sr`: time 3900 at sr 1), `rparam: width min`
+(`r_width`: −0.5), `rparam: mod min` (`r_modulation`: −0.5) and `rproc: read min`
+(`r_rates`: size 0.2 at sr 100). The survivors:
+
+  - Delay (relaxed): `dreset: fb` — the fields are never read; `dproc: read r min` /
+    `read r max` — `bk_delay_line_read_cubic` re-clamps to [1, size−4], absorbing the
+    outer clamp for every double including NaN and −0 (same-site `read l min` and
+    `read l max` are caught); `dproc: write unsan` — the line write sanitizes itself and
+    `bk_sanitize` is idempotent.
+  - Reverb (full): `rproc: write unsan` — same idempotence (caught same-site: `repl: rproc
+    write clamp1`, `rproc: inj scale`); `had: double sum` — `(float)a + (float)b` vs
+    `(float)(a + b)` on float-valued operands: for +, p = 53 >= 2·24 + 2, so double
+    rounding is innocuous (Figueroa 1995), argued from the theorem, not machine checked,
+    and assumes FLT_EVAL_METHOD 0 as measured (caught same-site: `had: sum`, `repl: had
+    sum float b half`); `rproc: read max` — unreachable: the read distance is at most
+    base·size·sr/1000 + 0.0008·sr·|lfo| with size <= 3, while size − 5 =
+    ceil(3.5·base·sr/1000) + 7, and 0.5·base/1000 >= 0.01185 > 0.0008 (caught same-site:
+    `repl: rproc read max half`).
+
+Rerun on the final battery: gcov 100% of 229 lines, 86/86 branch outcomes taken. ASan +
+UBSan + float-cast-overflow clean; the sanitizer and coverage dumps are byte-identical
+to the -O2 build.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -1945,9 +2000,12 @@ coverage builds give the same values (`Object.is`) as -O2.
     151 checks over 83 scripts, 91/91 mutants caught, 0 survivors; identity pinned at
     61/67/62, all out32 identical) → `spectral` (done, effect 18 of 22: PitchFormant:
     89 checks over 47 scripts, 138/146 mutants caught, 8 survivors each argued with a
-    caught replacement, one of them UB detected only by the sanitizer; identity 47/47/47).
-    Phase 5a still owes the other 4 effects (TalkBox, Delay, Reverb, Vocoder) and
-    `engine` (1,938 lines of JS: three effect files plus `engine.js`),
+    caught replacement, one of them UB detected only by the sanitizer; identity 47/47/47)
+    → `time` (done, effects 19–20 of 22: Delay, Reverb: 97 checks over 50 scripts,
+    196/203 mutants caught, 7 survivors argued, 3 caught replacements; Delay on the
+    relaxed policy, Reverb on the full one; identity pinned at 44/47/46, all out32
+    identical). Phase 5a still owes the other 2 effects (TalkBox, Vocoder) and
+    `engine` (1,593 lines of JS: TalkBox 500, Vocoder 338, `engine.js` 755),
     then the null-driver run of the composed native
     engine.
     Only after that is 5a green and 5b unblocked.

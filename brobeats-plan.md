@@ -1839,6 +1839,75 @@ gcov on the 83-script battery: 100% of 332 lines, 135/135 branch outcomes,
 184/184 calls. ASan + UBSan + float-cast-overflow clean. Source/header committed as
 `f7b9892`, battery/oracle as `a4ec1ef`.
 
+#### spectral
+
+**`spectral.js` → `packages/native/src/dsp/spectral.c` (273 lines, header 89), effect
+18 of 22: PitchFormant (phase-vocoder pitch shift with cepstral formant
+preservation).** A complex module, so the full mutation policy applies. One fixed
+~0.5 MB caller-owned struct (`BK_PV_MAX_FFT = 4096`, `BK_PV_MAX_BINS = 2049`) holding
+both channels, the FFT tables and the cepstrum work arrays; the FFT/cepstrum pointers
+point into the struct, so it is **initialised in place and must not be copied**. No
+allocation. Scalars are doubles; every JS `Float32Array` store is a float store.
+Faithful quirks: `x | 0` is a real ToInt32 (NaN/inf → 0, modulo-2^32 wrap), and a
+negative wrapped remap index misses exactly as a typed-array write does; reset clears
+only the STFT FIFOs, accumulator, phases and cursor (work arrays and the random walk
+survive); the smoothers and jitter walk step once even for frames <= 0; a NaN quality
+reproduces `sizes[NaN] === undefined` (logical zero-length FFT arrays, one-bin
+arrays, process writes 0 — shimmer can still make NaN — meter NaN, latency 0);
+re-selecting the same quality does not reinitialise; aliased l == r keeps the JS
+left-then-right write order. Jitter uses the shipping xorshift32, so there is no
+substituted randomness here.
+
+47 opcode scripts, 89 asserted checks green: constructor and per-block snapshots of
+every scalar and float array the JS channel owns, all four FFT sizes, every parameter
+including NaN/±inf/huge/tiny, envelope on/off, degenerate (NaN-quality) mode and the
+path out of it, reset, aliasing, irregular blocks, multiple and fractional sample
+rates, nonfinite pokes, DC, long RNG runs. Four scripts were added for the edges the
+first sweep exposed: `pf_ratio_overflow` (pitch 12280 drives the remap product to
++inf), `pf_ratio_2p31` (sample rate 100, pitch 372: the smoother converges within the
+script to exactly 2^31, hitting ToInt32's high-half boundary), `pf_degenerate_env`
+(computed envelope, then NaN quality) and `pf_formant_floor` (ratio below 1e-2, then
+1e-4).
+
+**Identity measured on glibc / emscripten / V8, 2026-10-06: 47/47 native vs JS, 47/47
+wasm vs JS, 47/47 native vs wasm**, pinned with signed zeros, every out64 and out32
+value. (NaN payload/sign bytes can differ, so this is `Object.is` identity, not
+byte-stream identity.)
+
+**Mutation sweep: 146 mutants, 138 caught by the parity battery, 8 survivors, each
+with a written manual argument and a same-site replacement mutant that the battery
+catches (8/8 replacements caught).** The arguments are mine and are not machine
+checked:
+
+  - `round: no neg zero` — unobservable: `js_round` only feeds the lifter clamp and
+    the quality index; ±0 select the same entry and nothing stores the rounded value.
+  - `int32: neg fold` — unreachable: differs only for trunc(x) <= -2^31, and the
+    callers are bounded (|qpd| ≈ 1026 at most, remap/source products are >= 0 or NaN).
+  - `int32: high half` (`>=` → `>`) — **not an equivalence: undefined behaviour on the
+    mutant.** At exactly 2^31 the mutant casts 2^31 to `int`; x86-64 returns INT_MIN
+    and the wasm build also yields an out-of-range index, so both miss the remap like
+    the original. The parity battery cannot see it; `-fsanitize=float-cast-overflow`
+    does (`runtime error: 2.14748e+09 is outside the range of representable values of
+    type 'int'`). Detected by the sanitizer run, not by parity.
+  - `pv: qpd round sign` — equivalent: differs only at qpd = ±0, where ±0.5 both
+    truncate to 0.
+  - `pv: odd fix sign` — equivalent: differs only at qpd == 0, but the branch requires
+    q odd.
+  - `ola: tail kept` — equivalent: the accumulator tail [n, 2n) starts zero and is
+    never written nonzero (OLA writes [0, n); the memmove targets [0, n)). The first
+    replacement tried (`+ n - hop`) also survived for the same reason and was replaced
+    by `+ hop`, which is caught.
+  - `quality: nan reinit twice` — equivalent: re-initialising an already-degenerate
+    channel is idempotent.
+  - `process: env edge` (`>` → `>=` at 0.001) — unreachable: for r in [0.5, 2], r − 1
+    is exact (Sterbenz) and a multiple of 2^-53, and 0.001·2^53 is not an integer.
+
+The first full sweep (138 mutants, 43 scripts) left 11 alive; the four scripts above
+killed `int32: nonfinite`, `init: degenerate env kept` and `env: inv floor`, and the
+full 138 were rerun on the final battery. gcov: 100% of 208 lines, 87/87 branch
+outcomes, 53/53 calls. ASan + UBSan + float-cast-overflow clean; sanitizer and
+coverage builds give the same values (`Object.is`) as -O2.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -1874,9 +1943,11 @@ gcov on the 83-script battery: 100% of 332 lines, 135/135 branch outcomes,
     survivors; identity pinned at 21/14/21, all out32 identical) → `modulation` (done,
     effects 12–17 of 22: Chorus, Flanger, Phaser, Tremolo, RingMod, FrequencyShifter:
     151 checks over 83 scripts, 91/91 mutants caught, 0 survivors; identity pinned at
-    61/67/62, all out32 identical). Phase 5a still owes the other 5 effects
-    (PitchFormant, TalkBox, Delay, Reverb, Vocoder) and `engine` (2,268 lines of JS:
-    four effect files plus `engine.js`),
+    61/67/62, all out32 identical) → `spectral` (done, effect 18 of 22: PitchFormant:
+    89 checks over 47 scripts, 138/146 mutants caught, 8 survivors each argued with a
+    caught replacement, one of them UB detected only by the sanitizer; identity 47/47/47).
+    Phase 5a still owes the other 4 effects (TalkBox, Delay, Reverb, Vocoder) and
+    `engine` (1,938 lines of JS: three effect files plus `engine.js`),
     then the null-driver run of the composed native
     engine.
     Only after that is 5a green and 5b unblocked.

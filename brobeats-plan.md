@@ -1729,6 +1729,73 @@ Under the relaxed policy these were **not** given same-shape replacement mutants
 
 So: 354 of 369 caught, 11 argued equivalent, 4 accepted. Not 0 survivors.
 
+#### dynamics
+
+**`dynamics.js` → `packages/native/src/dsp/dynamics.c` (448 lines, header 188), effects
+8–11 of 22: Compressor, Limiter, Gate, TransientShaper.** Caller-owned state and storage,
+C99, no allocation; four chain vtables with meters. No deliberate JS divergences.
+57 opcode scripts, 179 asserted checks green. Constructor and parameter snapshots,
+per-block state, delay/window buffers, audio, aliasing, nonfinite inputs, fractional
+rates, empty/negative blocks and resets are exercised.
+
+**Identity measured on glibc / emscripten / V8, 2026-10-06:** 21/57 native vs JS,
+14/57 wasm vs JS, 21/57 native vs wasm, explicitly pinned with signed zeros.
+Every out32 value (audio and buffer snapshots) is bit-identical in all 57 records on
+all three comparisons. All records are inside tolerance. `c_knee_edge` is additionally
+required bit-identical by name. The gate's exact -180 threshold and the adjacent
+representable thresholds are reached separately: `g_open_below` and `g_close_above`
+each hit once; the integer open/hold state is checked every block. Drift is in out64
+readings and **attributed to libm, not traced per record**. Over 200,000 inputs per
+function, disagreements with V8: glibc log10 1,222 / exp 19,630 / cos 6,530 / sin 6,860 /
+pow(10,x) 0; emscripten 4,789 / 19,465 / 1,648 / 1,913 / 66 respectively.
+MSVC remains completely unmeasured; bit-identity is empirical, not guaranteed.
+
+**Mutation sweep: 182 targeted mutants, 171 caught, 11 accepted survivors.** First
+sweep left 17 alive. `c_guards` closes constructor-coefficient, knee-floor and settled
+attack/release-clamp gaps; `g_hold_fraction` catches trunc→floor for a negative
+fractional hold (the gate accepts negative holds, unlike compressor lookahead).
+The complete 182-mutant sweep was rerun after these additions. Not 0 survivors.
+All 11 accepted survivors are named here, under the relaxed simple-effects policy:
+
+  - `curve: knee > -> >=`: lower-edge quadratic/bypass agree on tested edges;
+    general floating-point equivalence is not proved.
+  - `curve: knee < -> <=`: upper-edge quadratic/straight line agree on tested
+    edges; different rounding elsewhere is not excluded.
+  - `curve: w >= 0`: at zero width the strict interval is empty; NaN fails the guard.
+  - `curve: no w guard`: setters clamp width nonnegative; zero/NaN leave the strict
+    interval empty.
+  - `cproc: > -> >=`: equality selects a different coefficient but multiplies zero
+    envelope difference; the exercised exact-edge path agrees, no nonfinite proof.
+  - `cproc: meter abs`: ordinary curves produce gain reduction, not gain; no tested
+    rounding/nonfinite case distinguishes absolute value from negation.
+  - `lproc: peak >=`: equality stores the same nonnegative float; NaN fails either test.
+  - `lproc: attack <=`: equal need/envelope means the coefficient multiplies zero;
+    no tested nonfinite case distinguishes the choice.
+  - `lproc: g unclamped`: finite legal need lies in [0,1], with a convex envelope
+    recurrence starting at zero; no tested nonfinite counterexample.
+  - `lproc: meter >=`: equal values normally reassign the same value; signed-zero
+    and nonfinite distinctions are not exhaustively proved.
+  - `gproc: meter >=`: same meter-reassignment caveat.
+
+These arguments are mine and unchecked; none is presented as a proven equivalence,
+and no replacement is required by the relaxed policy. gcov: 100% of 332 lines and
+120 calls, 86/89 branch outcomes taken. The three unvisited outcomes are in
+`js_round`'s negative-zero return: its only caller rounds positive sample-rate-derived
+lookahead. ASan/UBSan passed the 57-record dynamics battery.
+
+**Delay-reader safety correction found while testing the next module:** the shared
+linear/cubic readers cast a NaN index to int; cubic then subtracts 1, producing a
+UBSan signed-overflow report. Both now return NaN before any integer cast, matching
+the JS's missing-array-property arithmetic. Infinities still clamp. Added
+`read.nonfinite` to the delay-line battery (reads before/after clear, NaN and both
+infinities). Delay-line verifier: 30 checks green; its identity pins deliberately move
+to 266 native/JS, 268 wasm/JS, 268 native/wasm after this one new record.
+The 78-record work-in-progress modulation battery is clean under ASan, UBSan and
+float-cast-overflow after the fix. Modulation is not counted done until its sweep.
+All 17 completed `verify-*-parity.mjs` scripts passed in the post-fix regression
+run (modulation excluded while its source is being mutated). Source/header committed
+as `6d4e48d`, battery/oracle as `61d9e8c`; delay safety correction as `5eb0d39`.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -1759,8 +1826,11 @@ So: 354 of 369 caught, 11 argued equivalent, 4 accepted. Not 0 survivors.
     of 22: Character, Glitch, NoiseGen: 216 checks green over 62 scripted cases, 354/369
     mutants caught, 11 argued equivalent, 4 accepted survivors under the relaxed policy,
     50/62 bit-identical to the JS on native and 45/62 on wasm, pinned, every case within
-    tolerance). Phase 5a still owes the other 15 effects and `engine` (3,145 lines of JS:
-    six effect files plus `engine.js`), then the null-driver run of the composed native
+    tolerance) → `dynamics` (done, effects 8–11 of 22: Compressor, Limiter, Gate,
+    TransientShaper: 179 checks over 57 scripts, 171/182 mutants caught and 11 accepted
+    survivors; identity pinned at 21/14/21, all out32 identical). Phase 5a still owes the
+    other 11 effects and `engine` (2,779 lines of JS: five effect files plus `engine.js`),
+    then the null-driver run of the composed native
     engine.
     Only after that is 5a green and 5b unblocked.
   - **`drum-synth` (done — see its writeup above for the result) is the first module

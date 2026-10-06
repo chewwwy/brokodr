@@ -1790,11 +1790,54 @@ the JS's missing-array-property arithmetic. Infinities still clamp. Added
 `read.nonfinite` to the delay-line battery (reads before/after clear, NaN and both
 infinities). Delay-line verifier: 30 checks green; its identity pins deliberately move
 to 266 native/JS, 268 wasm/JS, 268 native/wasm after this one new record.
-The 78-record work-in-progress modulation battery is clean under ASan, UBSan and
-float-cast-overflow after the fix. Modulation is not counted done until its sweep.
-All 17 completed `verify-*-parity.mjs` scripts passed in the post-fix regression
-run (modulation excluded while its source is being mutated). Source/header committed
-as `6d4e48d`, battery/oracle as `61d9e8c`; delay safety correction as `5eb0d39`.
+The modulation battery (78 records then, 83 now) is clean under ASan, UBSan and
+float-cast-overflow after the fix. All 17 then-completed `verify-*-parity.mjs`
+scripts passed in the post-fix regression run (modulation excluded while its source
+was being mutated). Source/header committed as `6d4e48d`, battery/oracle as
+`61d9e8c`; delay safety correction as `5eb0d39`.
+
+#### modulation
+
+**`modulation.js` → `packages/native/src/dsp/modulation.c` (395 lines, header 112),
+effects 12–17 of 22: Chorus, Flanger, Phaser, Tremolo, RingMod, FrequencyShifter.**
+Caller-owned state; Chorus and Flanger take caller-owned float delay storage
+(`bk_*_storage_floats`), the rest are fixed-size structs. No allocation. Six chain
+vtables; the meter is the inherited JS 0. Faithful quirks: Phaser steps its first
+smoothers/LFO even for frames <= 0; Tremolo/RingMod reset is a no-op;
+FrequencyShifter reset keeps `delayA` and phase; aliased l == r follows JS write
+order. NaN voices/stages stay doubles so the loops do not iterate, as in the JS;
+unknown/NaN LFO shapes are canonicalised to the sine default without casting NaN
+to int. Sample-and-hold draws come from a caller callback in [0,1) or a seeded
+internal xorshift — a replacement for Math.random, not a claim of random parity.
+
+83 opcode scripts, 151 asserted checks green: constructor/parameter snapshots,
+per-block state including full delay buffers, audio, aliasing, nonfinite inputs,
+fractional sample rates, empty/negative blocks, resets, internal-RNG fallback.
+Snapshot field counts are hand-counted independently of the producer
+(`STATE64=[73,51,201,19,18,100]`) to catch shared omissions. Two battery-only bugs
+fixed on the way: a negative block size moved the stimulus cursor backwards (C read
+`g_sig[-3]`), and the oracle's callback mirror drew 32 bits where `bk_rng_bipolar`
+uses the top 24.
+
+**Identity measured on glibc / emscripten / V8, 2026-10-06:** 61/83 native vs JS,
+67/83 wasm vs JS, 62/83 native vs wasm, pinned with signed zeros. Every out32 value
+(audio and delay buffers) is bit-identical in all 83 records on all three
+comparisons; every record within tolerance. `fl_invert`, `tr_mode` and
+`rm_sweepdepth` are additionally required bit-identical by name. The out64 drift is
+**attributed to libm transcendentals (sin/cos/exp/pow), not traced per record**.
+MSVC unmeasured; identity is empirical, not guaranteed.
+
+**Mutation sweep: 91 targeted mutants, 91 caught, 0 survivors, none accepted, none
+argued equivalent** — on the final 83-script battery. The first full sweep (78
+scripts) left 2 alive: `tr mode always tremolo` (the default phase offset made
+autopan and tremolo outputs coincide; `tr_mode_phase` sets phase 0) and
+`rm sweep edge` (the old script enabled sweep only after NaN had contaminated the
+LFO; `rm_sweep_edge` uses a fresh instance at depth exactly 0.001 and the next
+double above). Three `*_internal_rng` scripts cover the NULL-callback fallback.
+The complete 91-mutant sweep was rerun after these additions.
+gcov on the 83-script battery: 100% of 332 lines, 135/135 branch outcomes,
+184/184 calls. ASan + UBSan + float-cast-overflow clean. Source/header committed as
+`f7b9892`, battery/oracle as `a4ec1ef`.
 
 #### What (c) means for the remaining port
 
@@ -1828,8 +1871,12 @@ as `6d4e48d`, battery/oracle as `61d9e8c`; delay safety correction as `5eb0d39`.
     50/62 bit-identical to the JS on native and 45/62 on wasm, pinned, every case within
     tolerance) → `dynamics` (done, effects 8–11 of 22: Compressor, Limiter, Gate,
     TransientShaper: 179 checks over 57 scripts, 171/182 mutants caught and 11 accepted
-    survivors; identity pinned at 21/14/21, all out32 identical). Phase 5a still owes the
-    other 11 effects and `engine` (2,779 lines of JS: five effect files plus `engine.js`),
+    survivors; identity pinned at 21/14/21, all out32 identical) → `modulation` (done,
+    effects 12–17 of 22: Chorus, Flanger, Phaser, Tremolo, RingMod, FrequencyShifter:
+    151 checks over 83 scripts, 91/91 mutants caught, 0 survivors; identity pinned at
+    61/67/62, all out32 identical). Phase 5a still owes the other 5 effects
+    (PitchFormant, TalkBox, Delay, Reverb, Vocoder) and `engine` (2,268 lines of JS:
+    four effect files plus `engine.js`),
     then the null-driver run of the composed native
     engine.
     Only after that is 5a green and 5b unblocked.

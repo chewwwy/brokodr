@@ -173,7 +173,15 @@ int bk_engine_init(bk_engine *e, double sample_rate, int max_block, float *stora
 /* --- chain verbs: add, remove, move, param, mix, bypass, reset, clear ------
    `target` is BK_TARGET_*; `index` the pad or track (`cmd.index | 0`), ignored
    for the master. A bad pad or track index does nothing, as `if (!chain)
-   break` does. */
+   break` does.
+
+   padfx / loopfx add. engine.js hands the whole command to Chain.add, and
+   Chain.add reads `spec.index` as the insert position, so on a pad or loop
+   track chain cmd.index is BOTH the pad / track and the insert position
+   (engine-client.ts sends `index: pos`, which the worklet's `...cmd` spread
+   lets overwrite the pad). That is shipping behaviour; to reproduce it the
+   host sets spec->index to the same value it passes as `index` (NaN -> 0,
+   which is what splice() makes of clamp(NaN)). */
 bk_chain *bk_engine_chain(bk_engine *e, int target, double index);
 bk_slot *bk_engine_fx_add(bk_engine *e, int target, double index, const bk_slot_spec *spec);
 void bk_engine_fx_remove(bk_engine *e, int target, double index, int id);

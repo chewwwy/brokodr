@@ -46,7 +46,12 @@ const ok = (name, cond, detail = "") => {
 console.log("== 1. build a glue-free wasm ==");
 mkdirSync(buildDir, { recursive: true });
 const inc = join(root, "packages/native/include");
-const src = join(root, "packages/native/src/dsp/biquad.c");
+// biquad.c calls bk_clamp / bk_sanitize, which live in utils.c (moved out of
+// biquad.h by the biquad port), so the standalone module links both.
+const src = [
+  join(root, "packages/native/src/dsp/biquad.c"),
+  join(root, "packages/native/src/dsp/utils.c"),
+].join(" ");
 execFileSync(
   "bash",
   [

@@ -2137,6 +2137,143 @@ Coverage on the final battery: gcov 100% of 238 lines, 83/83 branches executed a
 taken, 98/98 calls. ASan + UBSan + float-cast-overflow are clean. The sanitizer and -O0
 coverage dumps differ from the -O2 build only in 8 NaN sign bytes.
 
+#### engine
+
+**`engine.js` → `packages/native/src/dsp/engine.c` (526 lines, header 241), plus the
+effect registry (`effect-registry.c`, 164 lines) that the chain's `add` needs. This is
+the composed engine, and with it every module of 5a is ported.** The engine wires the
+file player and its carrier bus, the master chain, BROBEATS (a drum rack with per-pad
+chains and the OFF/DIRECT/CHAIN routes), Smart Voice, the clock, the looper (with
+per-track chains and the master or drum record source), the io stage (gain, mute, swap,
+mono, bypass, master mix), clip latches and the meter block. Every verb of
+`applyCommand` is a `bk_engine_*` call. Storage is caller-owned: one zeroed block of
+`bk_engine_storage_floats(sr, max_block)` floats (~58 MB at 48 kHz, which is four 30 s
+stereo loop tracks plus the undo slot), carved at init. `bk_engine_process` does not
+allocate. The registry builds effects into caller storage, as a host must.
+
+The battery is `parity-engine.c` with `verify-engine-parity.mjs`. **70 scripted records,
+115 checks green.** Each record drives the C engine verb by verb. The JS oracle builds
+the same command objects that `Engine.applyCommand()` receives, maps every numeric key
+back to its name through `param-schema.ts` / `backend.ts`, and replays them against the
+shipping `engine.js`. They cover:
+  - Every verb, with bad targets, indices, ids, keys, NaN and ±inf.
+  - Both drum routes and OFF, the file routes, and pad and loop chains.
+  - Smart Voice, including two hits on different pads in one block.
+  - Looper source MASTER and DRUMS, including a drum-source take recorded while the rack
+    is idle (stale drum buffer).
+  - Clip latches at exactly 0.999 in and out. The level is
+    `pow(10, 6.0119096777992693 * 0.05)`, which is exactly 1.998 in glibc and in V8.
+  - Sums beyond the 1e30 sanitize bound on the file and drum input paths, irregular
+    blocks, in-place processing, re-INIT, and the init guards.
+  - A C-only layout check: the last carved region must end exactly at
+    `storage + bk_engine_storage_floats`. That is a C-side check, not parity.
+
+Every float32 sample (outputs and all 13 scratch buffers) is identical on all three
+sides. **Identity measured on glibc / emscripten / V8, 2026-10-10: 68/70 native vs JS,
+65/70 wasm vs JS, 65/70 native vs wasm.** The pins include signed zeros and cover every
+out64 and out32 value (`Object.is`). MSVC is unmeasured.
+  - **native/JS:** `e_chain` and `e_all_types` drift at slot meter 1, the compressor's
+    gain-reduction dB. It runs log10 / pow per sample, which is the dynamics battery's
+    known glibc-vs-V8 split.
+  - **wasm** also drifts on `e_chain_at` (the gate's slot meter), `e_voice_mixed` (a
+    compressor in slot 0) and `e_combo` (Smart Voice's lastVel, a dB → velocity map).
+    This is emscripten's libm, as in the dynamics and beat-classify batteries, attributed
+    by the first differing field and not re-evaluated.
+  - Every drift is in a double meter readout. The worst difference is 2.13e-14.
+
+**Mutation sweep: 320 mutants defined. 14 are argued equivalent and not swept;
+306 are swept, 305 caught, 1 accepted survivor.** The first sweep ran 307
+mutants and left 39 alive. 24 of those were battery gaps, now closed:
+  - `storage: block bufs` and `storage: hist off` are caught by the layout check (exit
+    5). ASan alone did not see them.
+  - New scripts `e_move_mid`, `e_reset_tail`, `e_nan_flags`, `e_pad_gate`,
+    `e_pad_layers`, `e_loop_two`, `e_clip_exact`, `e_huge_sum`, `e_drum_huge`,
+    `e_drum_pan`, `e_voice_edge`, `e_out_edge`, `e_voice_burst` and `e_loop_src` caught
+    the other 22. Those were move position, reset, bypass truthiness, the io swap NaN,
+    pad off and layers, the loop clear, the Smart Voice sanitize, float sum and hit pad,
+    the file/drum input sanitize, order and right channel, both clip thresholds, the
+    direct dry right channel, the drum record source, and the output clamp and sanitize
+    on both paths.
+  - A file or pad load of `SIG_DC` now reads a fresh buffer of the current level on both
+    sides. Before this, the buffer was never filled.
+
+13 `repl:` replacements were added, one at each argued site, and all are caught. Final
+sweep on the final battery: 306/306 run, 305 caught, the one accepted survivor and no other, all 13 `repl:` caught. Every kill came from the parity gate (`verify-engine-parity.mjs`, including its C-side layout exit). No kill depends on the sanitizer, which was run separately on the unmutated battery (below), and `engine.c` is byte-identical to HEAD
+afterwards. The arguments are mine and are not machine checked:
+  - `init: guard mb`: with the mutant, max_block 0 passes the engine guard, carves
+    zero-length buffers (no storage write), and is refused by `bk_chain_init`
+    (`max_block <= 0`). The result is still -1. Caught same-site: `init: guard storage`,
+    `repl: guard mb 129`.
+  - `init: carrier bus swap`: vocoder.c:242 and talkbox.c:309, the only carrier readers,
+    use `car_l[i] + car_r[i]`. Caught same-site: `init: no carrier bus`,
+    `repl: carrier bus l,l`.
+  - `param: recalc always`, `param: recalc any key`, `param: none guard`: the recalc is
+    a pure recompute (chain.c:202), and the stored latency is always current. Only
+    pitch reports latency, it changes only through its quality key, and add, remove,
+    clear and bypass recalc themselves. Caught same-site: `param: no recalc`,
+    `repl: recalc key !=`.
+  - `param: find after`: `set_param` never adds, removes or retypes a slot. Caught
+    same-site: `param: off`, `repl: find id+1`.
+  - `latency: recalc`: returning the stored value equals recomputing it. Move leaves the
+    order-independent sum alone. Caught same-site: `latency: read`,
+    `repl: latency recalc 0`.
+  - `cal: centroid no int`, `cal: attack no int`, `cal: capture no int`: the callees
+    apply `bk_onset_to_int32` themselves, and ToInt32 is idempotent. The pad verb is not
+    idempotent (its sign test reads the raw double), and `cal: pad no int` is caught.
+    Caught same-site: `cal: centroid swap`, `cal: attack->centroid`, `cal: capture off`,
+    and `repl: centroid arg+1`, `repl: attack arg+1`, `repl: capture cls+1`.
+  - `proc: file_on const`, `proc: f2i on`: `bk_file_player_process` returns 0 only after
+    zeroing car (file-player.c:353-360), and the unloaded branch zeroes it too. `l` is a
+    `bk_sanitize` result, never -0, so `bk_sanitize(l + 0.0) == l`. Caught same-site:
+    `proc: car no zero`, `proc: f2i any`, `repl: file_on 0`, `repl: f2i on !file_on`.
+  - `proc: pk in r >=`: on equality it stores the value it already holds. `fabs` never
+    yields -0. Caught same-site: `proc: pk in r off`, `repl: pk in r <`.
+  - `proc: direct float add`: a float sum rounded through double equals the correctly
+    rounded float sum (53 >= 2·24+2, Figueroa), under FLT_EVAL_METHOD 0. Caught
+    same-site: `proc: direct dry l`, `repl: direct float sub`.
+  - **Accepted, not equivalent:** `proc: tap mix lerp`. The two double lerps differ by a
+    few ulp(double). The float32 store absorbs that unless the exact value sits within
+    that band of a float32 rounding boundary, which is about 2^-28 per sample on noise.
+    No stimulus lands there. Caught same-site: `proc: tap mix l`, `proc: tap mix inv`,
+    `repl: tap lerp 1-mm`.
+
+**Coverage:** gcov on the final battery gives 100% of 373 lines, 173/173 branches
+executed and 171 taken (98.84%), and 138/138 calls. The two untaken branches are the
+`bk_chain_init` and `bk_looper_init` failure returns. Both are unreachable once the
+engine guard has passed, because the slot count is the fixed `BK_CHAIN_MAX_SLOTS` and the
+carved buffers are non-NULL. **ASan + UBSan + float-cast-overflow** are clean on all 70
+records, and the sanitizer dump is byte-identical to the -O2 dump.
+
+**Null driver (`packages/native/tests/null-driver.cc`, `scripts/verify-null-driver.mjs`):
+29 checks green.** The engine runs as a `brokodr::RenderSink` behind the Device seam,
+and the offline driver owns the block loop. The test uses a 96077-frame stereo stimulus
+at 128 and at 480 frames per block (each run ends on a short final block), plus one run
+at 128 under ASan + UBSan. A frame-timed schedule drives:
+  - a four-effect master chain and a pad-chain effect;
+  - pad loads and hits, and both drum routes;
+  - Smart Voice and the running clock;
+  - a loop recorded and played back;
+  - io gain, mute and mix changes.
+
+The checks:
+  - malloc, calloc, realloc and free are counted inside `render()` and stay at zero.
+  - The driver path is bit-identical to direct `bk_engine_process` calls.
+  - Every float32 output sample is bit-identical to the JS `Engine.applyCommand` replay
+    of the same schedule in the same block partition, signed zeros included.
+  - All 127 values of the final meter block are identical (`Object.is`).
+
+**Regression at close of 5a:** every `verify-*.mjs` passes and `build:web` builds. One
+fix went in on the way: `verify-wasm-worklet.mjs` compiled `biquad.c` alone, and it had
+failed to link (`bk_clamp`, `bk_sanitize` undefined) ever since the biquad port moved
+those into `utils.c` (94dfa90, reproduced there in a clean worktree). It now links
+`utils.c` too, and its 19 checks are green. `verify-dsp.mjs` showed 306/307 once, while
+the mutation sweep was loading the machine. The miss was its faster-than-realtime
+timing check, so that check is load-sensitive. It was 307/307 on rerun and again in the
+clean-worktree run.
+
+**Phase 5a is green.** All 22 effects, the engine and its registry are ported and
+gated, and the composed engine passes the null-driver run. 5b is unblocked.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -2183,10 +2320,13 @@ coverage dumps differ from the -O2 build only in 8 NaN sign bytes.
     only by the sanitizer and three resting on a Levinson bound not formally bounded for
     rounding; identity pinned at 48/43/43) → `vocoder` (done, effect 22 of 22: 104
     checks over 44 scripts, 230/236 mutants caught, 6 survivors argued with caught
-    same-site mutants; identity pinned at 42/40/40). **All 22 effects are done.** Phase
-    5a still owes `engine` (`engine.js`, 755 lines of JS, plus the effect registry that
-    the chain's `add` needs) and then the null-driver run of the composed native engine.
-    Only after that is 5a green and 5b unblocked.
+    same-site mutants; identity pinned at 42/40/40). **All 22 effects are done.** Then
+    `engine` (done, with the effect registry: 115 checks over 70 scripts, 305/306
+    swept mutants caught, 14 argued equivalent and not swept, 1 accepted survivor, 13
+    caught `repl:` replacements; identity pinned at 68/65/65, every float32 sample
+    identical) → the null-driver run of the composed native engine (done: 29 checks,
+    zero allocation in `render()`, bit-identical to the JS engine at 128 and 480 frames
+    per block). **Phase 5a is green; 5b is unblocked.**
   - **`drum-synth` (done — see its writeup above for the result) is the first module
     deliberately ported without a JS-parity gate, and reading it is what forced the
     question.** 321 lines, six renderers, and it

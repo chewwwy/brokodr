@@ -205,6 +205,14 @@ static void init_engine(double sr, int max_block) {
     fprintf(stderr, "engine init refused\n");
     exit(4);
   }
+  /* C-only layout check: the last carved region (the undo slot) must end
+     exactly where bk_engine_storage_floats says the storage does. A region the
+     sizing forgot is otherwise invisible until a near-max-length loop writes
+     its tail past the end. */
+  if (g_e->looper.undo_r + g_e->looper.max_frames != g_store + g_store_n) {
+    fprintf(stderr, "engine storage layout does not match bk_engine_storage_floats\n");
+    exit(5);
+  }
   for (k = 0; k < BK_ENGINE_METER_COUNT; k++) g_meters[k] = METER_FILL;
   g_seed = 0x2545f491u;
   g_add_mix = UNDEF_;
@@ -252,6 +260,24 @@ static void add_fx(int target, double index, int type, int id, double at) {
 
 static double sig_at(int s, int at) { return s == SIG_DC ? g_dc : (double)g_sig[s][at]; }
 
+/* A file or pad load of SIG_DC reads a fresh buffer of the current level, as
+   the JS's new Float32Array(n).fill(dc) does: the engine keeps the pointer. */
+#define DC_POOL 4
+static float g_dcpool[DC_POOL][SIG_N];
+static int n_dcpool;
+static const float *load_sig(int s) {
+  int j;
+  float *d;
+  if (s != SIG_DC) return g_sig[s];
+  if (n_dcpool >= DC_POOL) {
+    fprintf(stderr, "SIG_DC load pool exhausted\n");
+    exit(6);
+  }
+  d = g_dcpool[n_dcpool++];
+  for (j = 0; j < SIG_N; j++) d[j] = (float)g_dc;
+  return d;
+}
+
 static void run_block(int bs, int sl, int sr, int inplace) {
   int j;
   for (j = 0; j < bs; j++) {
@@ -285,6 +311,7 @@ static void run_script(FILE *f, const char *name, const double *ops, size_t n_op
   g_cursor = 0;
   g_gain = 1.0;
   g_dc = 0.0;
+  n_dcpool = 0;
   n_pokes = 0;
   g_draws = 0.0;
   init_engine(48000.0, 128);
@@ -327,7 +354,7 @@ static void run_script(FILE *f, const char *name, const double *ops, size_t n_op
       case OP_FXRESET: bk_engine_fx_reset(g_e, (int)a, b, (int)c); break;
       case OP_FXCLEAR: bk_engine_fx_clear(g_e, (int)a, b); break;
       case OP_IO: bk_engine_io(g_e, (int)a, b); break;
-      case OP_FILELOAD: bk_engine_file_load(g_e, g_sig[(int)a], g_sig[(int)b], (int)c, d); break;
+      case OP_FILELOAD: bk_engine_file_load(g_e, load_sig((int)a), load_sig((int)b), (int)c, d); break;
       case OP_FILECLEAR: bk_engine_file_clear(g_e); break;
       case OP_FILE: bk_engine_file_param(g_e, (int)a, b); break;
       case OP_FILEROUTE: bk_engine_file_route(g_e, a); break;
@@ -335,7 +362,7 @@ static void run_script(FILE *f, const char *name, const double *ops, size_t n_op
       case OP_PAD: bk_engine_pad(g_e, a, ops[i + 2] == UNDEF_ ? 1.0 : b); break;
       case OP_PADOFF: bk_engine_pad_off(g_e, a); break;
       case OP_PADPARAM: bk_engine_pad_param(g_e, a, (int)b, c); break;
-      case OP_PADLOAD: bk_engine_pad_load(g_e, a, b, g_sig[(int)c], (int)d, e5); break;
+      case OP_PADLOAD: bk_engine_pad_load(g_e, a, b, load_sig((int)c), (int)d, e5); break;
       case OP_PADCLEAR: bk_engine_pad_clear(g_e, a); break;
       case OP_DRUM: bk_engine_drum(g_e, (int)a, b); break;
       case OP_DRUMRESET: bk_engine_drum_reset(g_e); break;
@@ -524,6 +551,42 @@ static const double e_voice_mixed[] = {TB,KIT,VOICEP(BK_VOICE_ENABLED,1),IO(BK_I
 
 /* ---- everything at once */
 static const double e_combo[] = {TB,KIT,FLOAD(VOICE,RAMP,40000,44100),FILEP(BK_FILE_P_PLAY,1),FILEP(BK_FILE_P_LOOP,1),FROUTE(3),MADD(BK_FX_VOCODER,1),MP(1,BK_P_VOCODER_SOURCE,1),MADD(BK_FX_PITCH,2),MP(2,BK_P_PITCH_PITCH,-5),MADD(BK_FX_REVERB,3),MADD(BK_FX_CHARACTER,4),MP(4,BK_P_CHARACTER_NOISE,60),ADD(T_P,0,BK_FX_SAT,5,U),VOICEP(BK_VOICE_ENABLED,1),IO(BK_IO_MASTER_MIX,0.8),IO(BK_IO_IN_GAIN,3),CLOCK(BK_CLOCK_P_QUANTIZE,0),LOOP(0,0),PROC(60,128,BEAT,VOICE),LOOP(0,0),ADD(T_L,0,BK_FX_PHASER,6,U),FXP(T_L,0,6,BK_P_PHASER_SHAPE,4),PROC(60,128,BEAT,NOISE),SNAP,PROC(30,128,ZERO,ZERO),SNAP,END};
+/* ---- verbs whose effect the scripts above leave unobservable. */
+/* A mid-chain move: [1,2,3] -> [1,3,2], order-sensitive (dist, delay, sat). */
+static const double e_move_mid[] = {TB,MADD(BK_FX_DIST,1),MP(1,0,30),MADD(BK_FX_DELAY,2),MADD(BK_FX_SAT,3),SHORT,MOVE(T_M,0,3,1),SHORT,SNAP,END};
+/* A reset on a slot with a live tail, then silence. */
+static const double e_reset_tail[] = {TB,MADD(BK_FX_DELAY,1),SHORT,FXRESET(T_M,0,1),PROC(120,128,ZERO,ZERO),SNAP,END};
+/* NaN is falsy: bypass and swap both switch off. */
+static const double e_nan_flags[] = {TB,MADD(BK_FX_DIST,1),MP(1,0,30),BYP(T_M,0,1,1),IO(BK_IO_SWAP,1),PROC(6,128,VOICE,NOISE),BYP(T_M,0,1,NAN_),IO(BK_IO_SWAP,NAN_),PROC(6,128,VOICE,NOISE),SNAP,END};
+/* Gate mode (< 0.5) is the one a pad-off releases. */
+static const double e_pad_gate[] = {TB,KIT,PADP(0,BK_PAD_P_MODE,0),PAD(0,U),PROC(3,128,ZERO,ZERO),PADOFF(0),PROC(12,128,ZERO,ZERO),SNAP,END};
+/* A second layer: round robin between the beat and the click. */
+static const double e_pad_layers[] = {TB,KIT,PLOAD(0,1,NOISE,600,48000),PAD(0,U),SHORT,PAD(0,U),SHORT,SNAP,END};
+/* Clear of one track leaves the other playing. */
+static const double e_loop_two[] = {TB,CLOCK(BK_CLOCK_P_QUANTIZE,0),LOOP(0,0),PROC(20,128,VOICE,VOICE),LOOP(0,0),LOOP(0,1),PROC(20,128,NOISE,NOISE),LOOP(0,1),SHORT,LOOP(3,0),SHORT,SNAP,END};
+/* A peak of exactly 0.999 (0.5 * 1.998; pow(10, 6.0119096777992693 * 0.05)
+   is 1.998 exactly in glibc and V8) sets both clip flags: `>=`, not `>`. */
+#define G1998 6.0119096777992693
+static const double e_clip_exact[] = {TB,LEVEL(0.5),IO(BK_IO_IN_GAIN,G1998),PROC(200,128,DC,DC),SNAP,TB,LEVEL(0.5),IO(BK_IO_OUT_GAIN,G1998),PROC(200,128,DC,DC),SNAP,END};
+/* Sums past the 1e30 sanitize bound: file + input, drums + input, and the
+   order of the two adds when both reach the input. */
+static const double e_huge_sum[] = {TB,LEVEL(9e29),FLOAD(DC,DC,20000,48000),FILEP(BK_FILE_P_PLAY,1),LEVEL(5e28),PLOAD(0,0,DC,20000,48000),LEVEL(9e29),DRUM(BK_DRUM_P_ROUTE,2),PAD(0,U),PROC(20,128,DC,DC),SNAP,END};
+static const double e_drum_huge[] = {TB,LEVEL(9e29),PLOAD(0,0,DC,20000,48000),DRUM(BK_DRUM_P_ROUTE,2),PAD(0,U),PROC(4,128,DC,DC),SNAP,END};
+/* A panned pad, through the chain and direct, with a master mix below 1. */
+static const double e_drum_pan[] = {TB,KIT,PADP(0,BK_PAD_P_PAN,-0.8),IO(BK_IO_MASTER_MIX,0.5),PAD(0,U),SHORT,SNAP,DRUM(BK_DRUM_P_ROUTE,2),PAD(0,U),SHORT,SNAP,END};
+/* Smart Voice's mono feed: a NaN, an inf, a tiny, and a pair whose double
+   mean is <= 1e30 but whose float sum's mean is not. */
+static const double e_voice_edge[] = {TB,VOICEP(BK_VOICE_ENABLED,1),PROC(4,128,BEAT,BEAT),POKE(0,5,NAN_),POKE(1,6,INF_),POKE(0,7,1e-20),POKE(0,9,1.999999878979205e+30),POKE(1,9,7.555786372591432e+22),PROC(1,128,BEAT,BEAT),SNAP,END};
+/* The output stage's clamp and sanitize, both paths: 2.0 clamps, 5e30
+   clamps (not sanitises), and a sub-1e-18 output sanitises. */
+static const double e_out_edge[] = {TB,LEVEL(0.5),IO(BK_IO_OUT_GAIN,12),PROC(40,128,DC,DC),SNAP,IO(BK_IO_OUT_GAIN,620),PROC(40,128,DC,DC),SNAP,TB,CLOCK(BK_CLOCK_P_QUANTIZE,0),LOOP(0,0),LEVEL(1.5e-18),IO(BK_IO_OUT_GAIN,-12),PROC(40,128,DC,DC),SNAP,END};
+/* Smart Voice firing more than one pad in one 4096-frame block: a noise-kind
+   onset in a 200-frame block, then a rewind to the beat's first (triangle-kind)
+   onset. Measured, not designed: the `hit pad` mutant is what shows it. */
+static const double e_voice_burst[] = {INIT(48000,4096),KIT,PROC(1,4096,ZERO,ZERO),PROC(1,704,ZERO,ZERO),VOICEP(BK_VOICE_ENABLED,1),VOICEP(BK_VOICE_MIN_GAP_MS,1),PROC(1,200,BEAT,BEAT),REWIND,PROC(2,4096,BEAT,BEAT),SNAP,END};
+/* A drum-sourced track recorded after the drums stop sounding to the engine
+   (route off): the stale drum block must not be recorded. Panned. */
+static const double e_loop_src[] = {TB,PLOAD(0,0,NOISE,20000,48000),CLOCK(BK_CLOCK_P_QUANTIZE,0),PADP(0,BK_PAD_P_PAN,-0.8),LOOPP(2,BK_LOOP_P_SOURCE,1),PAD(0,U),PROC(6,128,ZERO,ZERO),LOOP(0,2),PROC(6,128,ZERO,ZERO),DRUM(BK_DRUM_P_ROUTE,0),PROC(10,128,ZERO,ZERO),LOOP(0,2),PROC(20,128,ZERO,ZERO),SNAP,END};
 static const double mixed_inits[] = {TB,KIT,PAD(0,U),MADD(BK_FX_DELAY,1),SHORT,INIT(8000,32),PROC(20,32,VOICE,VOICE),PLOAD(0,0,BEAT,300,8000),PAD(0,U),MADD(BK_FX_REVERB,1),PROC(20,32,VOICE,VOICE),SNAP,END};
 
 #define S(n) {#n,n,sizeof(n)/sizeof(n[0])}
@@ -538,6 +601,8 @@ static const script scripts[] = {
   S(e_padfx),S(e_padfx_order),S(e_padfx_bad),S(e_fx_nochain),S(e_padfx_clear),
   S(e_loop),S(e_loop_params),S(e_loop_drums),S(e_loop_quant),S(e_loop_fx),S(e_loop_bad),S(e_loop_panic),S(e_loop_mix),
   S(e_voice),S(e_voice_params),S(e_voice_cal),S(e_voice_capture),S(e_voice_mixed),
+  S(e_move_mid),S(e_reset_tail),S(e_nan_flags),S(e_pad_gate),S(e_pad_layers),S(e_loop_two),S(e_clip_exact),
+  S(e_huge_sum),S(e_drum_huge),S(e_drum_pan),S(e_voice_edge),S(e_out_edge),S(e_voice_burst),S(e_loop_src),
   S(e_combo),S(mixed_inits)};
 
 /* Gated two-period voice-like buzz, as in the vocoder battery. */

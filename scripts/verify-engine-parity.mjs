@@ -192,6 +192,7 @@ function replay(ops) {
     let dc = 0;
     let pokes = [];
     const sig = (s, at) => (s === SIG_DC ? dc : SIGS[s][at]);
+    const loadSig = (s) => (s === SIG_DC ? new Float32Array(SIG_N).fill(dc) : SIGS[s]);
     const L = new Float32Array(MAX_BLOCK);
     const R = new Float32Array(MAX_BLOCK);
     const OL = new Float32Array(MAX_BLOCK);
@@ -257,7 +258,7 @@ function replay(ops) {
         if (IO_NAME[a] !== undefined) cmd[IO_NAME[a]] = b;
         e.applyCommand(cmd);
       } else if (op === OP.FILELOAD)
-        e.applyCommand({ t: "fileload", chL: SIGS[a | 0], chR: SIGS[b | 0], frames: c | 0, rate: d });
+        e.applyCommand({ t: "fileload", chL: loadSig(a | 0), chR: loadSig(b | 0), frames: c | 0, rate: d });
       else if (op === OP.FILECLEAR) e.applyCommand({ t: "fileclear" });
       else if (op === OP.FILE) e.applyCommand({ t: "file", key: FILE_KEY[a] ?? `unknown:${a}`, value: b });
       else if (op === OP.FILEROUTE) e.applyCommand({ t: "fileroute", value: a });
@@ -265,7 +266,7 @@ function replay(ops) {
       else if (op === OP.PADOFF) e.applyCommand({ t: "padoff", index: a });
       else if (op === OP.PADPARAM) e.applyCommand({ t: "padparam", index: a, key: PAD_KEY[b] ?? `unknown:${b}`, value: c });
       else if (op === OP.PADLOAD)
-        e.applyCommand({ t: "padload", index: a, layer: b, data: SIGS[c | 0], frames: d | 0, rate: e5 });
+        e.applyCommand({ t: "padload", index: a, layer: b, data: loadSig(c | 0), frames: d | 0, rate: e5 });
       else if (op === OP.PADCLEAR) e.applyCommand({ t: "padclear", index: a });
       else if (op === OP.DRUM) e.applyCommand({ t: "drum", key: DRUM_KEY[a] ?? `unknown:${a}`, value: b });
       else if (op === OP.DRUMRESET) e.applyCommand({ t: "drumreset" });
@@ -336,7 +337,7 @@ const lenBad = native.filter((r) => {
   return r.out64.length !== n64 || r.out32.length !== n32 || refs.get(r.name).out64.length !== n64 || refs.get(r.name).out32.length !== n32;
 });
 ok("payload lengths match the script, both sides", lenBad.length === 0, lenBad.map((r) => r.name).join(" "));
-ok("56 records", native.length === 56, `${native.length}`);
+ok("70 records", native.length === 70, `${native.length}`);
 
 // Empirical glibc/emscripten/V8 pins measured 2026-10-10 (engine), MSVC
 // unmeasured: every record, out64 and out32, signed zeros included. Every
@@ -349,9 +350,9 @@ ok("56 records", native.length === 56, `${native.length}`);
 //    slot 0) and e_combo (Smart Voice meter 4, lastVel, a dB -> velocity map):
 //    emscripten's libm, as in the dynamics and beat-classify batteries.
 //    Attributed by the first differing field, not re-evaluated.
-const IDENTITY_NATIVE = 54,
-  IDENTITY_WASM = 51,
-  IDENTITY_CROSS = 51;
+const IDENTITY_NATIVE = 68,
+  IDENTITY_WASM = 65,
+  IDENTITY_CROSS = 65;
 compareToJs({ name: "native", dump: native, reference, ok, expectIdentical: IDENTITY_NATIVE });
 if (wasm) {
   compareToJs({ name: "wasm", dump: wasm, reference, ok, expectIdentical: IDENTITY_WASM });

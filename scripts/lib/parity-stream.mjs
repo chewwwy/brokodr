@@ -156,7 +156,7 @@ function describeChildFailure(e) {
   return msg.slice(0, 200) || "unknown failure";
 }
 
-export function buildAndRun({ root, name, sources, include, ok, state }) {
+export function buildAndRun({ root, name, sources, include, ok, state, emccFlags = [] }) {
   const buildDir = `${root}/packages/native/build`;
   mkdirSync(buildDir, { recursive: true });
   const nativeBin = `${buildDir}/${name}`;
@@ -183,7 +183,7 @@ export function buildAndRun({ root, name, sources, include, ok, state }) {
         [
           "-lc",
           `source ${EMSDK}/emsdk_env.sh >/dev/null 2>&1 && emcc -std=c99 -O2 -I ${include} ${sources.join(" ")} ` +
-            `-sNODERAWFS=1 -sENVIRONMENT=node -sEXIT_RUNTIME=1 -o ${wasmJs}`,
+            `-sNODERAWFS=1 -sENVIRONMENT=node -sEXIT_RUNTIME=1 ${emccFlags.join(" ")} -o ${wasmJs}`,
         ],
         { stdio: "pipe" },
       );

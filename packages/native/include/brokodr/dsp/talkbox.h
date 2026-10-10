@@ -1,4 +1,4 @@
-/* Bro.Kodr — C99 port of effects/talkbox.js (TalkBox, effect 19 of 22).
+/* Bro.Kodr — C99 port of effects/talkbox.js (TalkBox, effect 21 of 22).
  * LPC source-filter talk box: pre-emphasised Hamming-window autocorrelation,
  * Levinson-Durbin reflection coefficients, an all-pole lattice driven by an
  * internal synth or the chain's file-carrier bus, de-emphasis, breath leak,

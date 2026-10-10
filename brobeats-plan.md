@@ -1963,6 +1963,91 @@ Rerun on the final battery: gcov 100% of 229 lines, 86/86 branch outcomes taken.
 UBSan + float-cast-overflow clean; the sanitizer and coverage dumps are byte-identical
 to the -O2 build.
 
+#### talkbox
+
+**`talkbox.js` → `packages/native/src/dsp/talkbox.c` (397 lines, header 96), effect
+21 of 22: TalkBox.** An LPC source-filter talk box: pre-emphasised Hamming-window
+autocorrelation, Levinson-Durbin reflection coefficients, an all-pole lattice driven by
+an internal synth (five carriers, glide, pitch follow) or the chain's file-carrier bus,
+de-emphasis, a breath leak, a squelch gate, 4x oversampled tanh drive and an output
+tilt. A complex module, so the full mutation policy applies. Caller-owned struct plus
+`bk_talkbox_storage_floats(sr, max_block)` caller-owned floats for the history and mono
+block, no allocation. Scalars and the analysis scratch (the JS `Float64Array`s) are
+doubles; history, window, mono block and oversampler are floats. Faithful quirks: the
+raw parameters keep NaN; a NaN carrier selects the saw but reads `CARRIER_RMS[NaN]`
+(undefined), so the excitation is NaN; a NaN order skips the autocorrelation and
+Levinson loop yet still applies the noise floor to the stale `acf[0]`, which compounds
+across hops; a NaN tract reads `buf[NaN]`, a NaN frame, and takes the silence path;
+`activeOrder` starts at 22 with zero coefficients; the oscillators keep running on the
+file carrier; drive is skipped at <= 0.001; reset leaves oscillators, noise state,
+tracker, tracked pitch, four smoothers, the analysis scratch and the mono block alone;
+the trailing `!isFinite(b[0])` reset guard is kept though it cannot fire. The noise
+carrier is the JS xorshift32 on int32 state.
+
+50 opcode scripts, 100 asserted checks green: constructor and per-block snapshots of
+every scalar, the lattice and analysis arrays, all carriers including NaN, every
+parameter including NaN/±inf/huge/tiny, follow and glide, source on/off with quiet,
+one-sided and loud buses, reset (also at order 40), aliasing, irregular blocks (0 and
+negative sizes), four sample rates, nonfinite and ±3e38 pokes, DC, a 16 kHz re-INIT.
+
+**Identity measured on glibc / emscripten / V8, 2026-10-10: 48/50 native vs JS, 43/50
+wasm vs JS, 43/50 native vs wasm**, pinned with signed zeros, every out64 and out32
+value (`Object.is`; the -O0 coverage build differs from -O2 only in NaN sign bytes).
+Drift is attributed by elimination from the first differing field, not traced by
+re-evaluating libm: native/JS `t_blocks` (in_env attack after the 16 kHz re-INIT is
+exp(-1/48), the known one-ulp glibc/V8 split) and `t_rates` (its 4500.3 Hz leg first
+differs at the oversampler's down-filter state while the up-filter state agrees; the
+only operation between them is the shaper's tanh, so a tanh split is the likely cause,
+not confirmed). wasm/JS and native/wasm drift on every drive-on script (`t_default
+t_drive t_blocks t_rates t_combo t_drive_blocks mixed_inits`), each first at
+down-filter state: emscripten's tanh. The 48 kHz drive scripts being identical on
+native shows only that glibc and V8 agree on the arguments those scripts reach.
+
+**Mutation sweep: 274 mutants, 261 caught by the parity battery, 13 accepted
+survivors, each with a written manual argument and a caught same-site replacement
+(16 `repl:` mutants, all caught).** The first sweep (264 mutants) left 25 alive;
+battery additions (`t_quiet`, `t_bus_quiet`, `t_bus_lr`, `t_reset40`, `t_kpos`,
+`t_tail_long`, the ±inf and ±3e38 pokes, then `t_tract_nan`, `t_inf_frac`,
+`t_pitch_snap`, `t_breath_small`) and replacement mutants brought it to 274. A later sweep lost two (`proc: drive frames`, `reset: os`) that `t_blocks` had
+caught before the battery moved the drive off by default; `t_drive_blocks` (drive 0.6
+across negative, zero and odd block sizes, reset) now catches both. Final sweep on the
+final battery: 274/274 run, 0 unexpected survivors. The arguments are mine and are not
+machine checked:
+
+  - `lerp: no nan guard` — **reachable, and undefined behaviour on the mutant, detected
+    by the sanitizer, not by parity.** A NaN tract makes every read position NaN;
+    without the guard `(int)NaN` is UB (C99 6.3.1.4). `-fsanitize=float-cast-overflow`
+    aborts at `read_lerp`; at -O2 on x86-64 `cvttsd2si` gives INT_MIN, the wrapped index
+    is in range and `a + (b - a) * NaN` is NaN, so the parity values agree (measured: the
+    mutant dump matches under `Object.is` in all 50 records and differs in 1200 bytes,
+    every one a NaN sign byte). Caught same-site: `repl: lerp nan zero`.
+  - `an: span cap` — unreachable: h = 2n + max_block + 8 and r <= 2 give ceil(n·r) + 2 <
+    h − 5. `an: p order cap` / `an: p frame cap` — order is in [8, 40] or NaN and n − 3 >=
+    253, so either cap selects the order.
+  - `an: km strict`, `an: km no bound`, `an: err floor` — **these rest on a manual
+    Levinson bound that is not formally bounded for rounding.** The autocorrelation is
+    biased (a PSD Toeplitz matrix) and `acf[0]` is loaded by 1e-4·r0 + 1e-9, so in exact
+    arithmetic err_m >= λ_min and 1 − km² >= ~1e-4, i.e. |km| <= ~0.99995 and err >= 1e-9
+    > 1e-20. That float rounding at order <= 40 stays inside that gap is assumed, not
+    proven. Non-finite frames give err = inf and km = ±0 or NaN, which `isfinite` handles
+    either way. Caught same-site: `repl: an km bound 0.99`, `an: km finite`, `repl: an err
+    floor 1e-3`.
+  - `an: g no max` — err is positive or +inf, never negative or NaN.
+  - `shape: norm guard` — the shaper runs only at drive > 0.001, so d > 1.009.
+  - `proc: gate >=` — at env == thresh the taken arm is min(1, +0 / positive) = +0, the
+    else arm's value, signed zero included.
+  - `proc: tracked >=` — tracked_hz starts at 110 and is assigned only positive values.
+  - `proc: guard off` — b[0] is only ever 0 or a `bk_sanitize` result, always finite.
+  - `bus: swap` — the bus is read only as car_l[i] + car_r[i], and IEEE addition is
+    commutative, signed zeros included (only a two-NaN payload could differ; the bus
+    stimulus is finite). Caught same-site: `repl: bus both l`.
+
+Rerun on the final battery: gcov 100% of 297 lines, 118/118 branches executed, 95.76% of
+branch outcomes taken. The five untaken outcomes are exactly the arguments above (the
+`|km| >= 1` and `!(err > 1e-20)` breaks, the shaper's 1.0001 arm, `tracked_hz > 0`
+false, the reset-guard call). ASan + UBSan + float-cast-overflow clean; the sanitizer
+dump is byte-identical to the -O2 build.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -2004,10 +2089,12 @@ to the -O2 build.
     → `time` (done, effects 19–20 of 22: Delay, Reverb: 97 checks over 50 scripts,
     196/203 mutants caught, 7 survivors argued, 3 caught replacements; Delay on the
     relaxed policy, Reverb on the full one; identity pinned at 44/47/46, all out32
-    identical). Phase 5a still owes the other 2 effects (TalkBox, Vocoder) and
-    `engine` (1,593 lines of JS: TalkBox 500, Vocoder 338, `engine.js` 755),
-    then the null-driver run of the composed native
-    engine.
+    identical) → `talkbox` (done, effect 21 of 22: 100 checks over 50 scripts, 261/274
+    mutants caught, 13 survivors argued with caught replacements, one of them UB detected
+    only by the sanitizer and three resting on a Levinson bound not formally bounded for
+    rounding; identity pinned at 48/43/43). Phase 5a still owes the last effect (Vocoder)
+    and `engine` (1,093 lines of JS: Vocoder 338, `engine.js` 755), then the null-driver
+    run of the composed native engine.
     Only after that is 5a green and 5b unblocked.
   - **`drum-synth` (done — see its writeup above for the result) is the first module
     deliberately ported without a JS-parity gate, and reading it is what forced the

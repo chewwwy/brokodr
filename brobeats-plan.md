@@ -2048,6 +2048,95 @@ branch outcomes taken. The five untaken outcomes are exactly the arguments above
 false, the reset-guard call). ASan + UBSan + float-cast-overflow clean; the sanitizer
 dump is byte-identical to the -O2 build.
 
+#### vocoder
+
+**`vocoder.js` → `packages/native/src/dsp/vocoder.c` (302 lines, header 90), effect 22
+of 22: Vocoder. All 22 effects are now ported.** A channel vocoder: up to 32
+log-spaced bands, each a 4-pole bandpass on the modulator into an RMS envelope follower
+and the same 4-pole bandpass on the carrier, multiplied per band. The carrier is a
+PolyBLEP saw, a pulse, a dual saw, noise, sub + saw, or the chain's file-carrier bus,
+with pitch follow through the shared autocorrelation tracker and a sibilance noise path
+into the bands above 3 kHz. A complex module, so the full mutation policy applies.
+Every JS field is a double scalar. The only JS `Float32Array` is the UI ladder, which
+`bk_vocoder_visual` writes into a caller buffer: a fixed-size struct, no storage, no
+allocation. The two `Math.random()` sites call a `bk_random_fn`; the battery installs a
+generator it mirrors in JS, with the draw order documented per frame (the noise carrier
+only for carrier type 3, even when the file carrier replaces it, then the sibilance noise,
+always).
+
+Faithful quirks:
+  - The raw parameters keep NaN. A NaN band count (`clamp(Math.round(NaN))`) leaves no
+    active band and makes `1/sqrt(n)` NaN, so the output sanitises to 0.
+  - NaN freqlo, freqhi, q, attack and release reach the filters and followers as NaN.
+  - The band count, range, q, tone and spread rebuild lazily at the next process call.
+    Bands above the count keep their old settings.
+  - The oscillators keep running under the file carrier. The pulse carrier's
+    `osc1.pw = 0.3` persists, while the sub oscillator keeps the default pw 0.5.
+  - The sibilance highpass is set at the top of every process call, so until the first
+    call it keeps the Biquad constructor state.
+  - Reset leaves the smoothers, oscillators, pitch tracker and tracked pitch alone.
+  - The JS `envSum` is never read, and the `n === 1` band-position guard cannot fire
+    (n >= 4). Neither has a counterpart.
+
+44 opcode scripts, 104 asserted checks green. They cover:
+  - Constructor and per-block snapshots of every scalar and all 32 bands' settings and
+    state.
+  - Every carrier including NaN, and every parameter including NaN, ±inf, huge and tiny
+    values.
+  - Follow, the bus at the RMS and squelch boundaries, a `-0` bus carrier, and reset at
+    the widest band count.
+  - Irregular blocks, four sample rates, nonfinite pokes, and a re-INIT.
+
+**Identity measured on glibc / emscripten / V8, 2026-10-06, and remeasured unchanged
+2026-10-10: 42/44 native vs JS, 40/44 wasm vs JS, 40/44 native vs wasm.** The pins
+include signed zeros and cover every out64 and out32 value (`Object.is`).
+  - **native/JS:** only `v_range_ulp` and `v_rates_ulp` drift, both on purpose. Each
+    first differs at a band's `modA.z1` in block 0. The band coefficients were
+    re-evaluated outside the battery:
+    - The centre frequencies (log2, pow) and w0 agree bit for bit.
+    - glibc and V8 are one ulp apart on sin(w0) for band 9 at freqlo 40 (and 20 and
+      -inf, which clamp to it).
+    - They are also one ulp apart on cos(w0) for bands 11 and 15 at 3000-4000 Hz, band 13
+      at 96 kHz and band 14 at 4500.3 Hz.
+    - The other scripts avoid those settings.
+  - **wasm** also drifts on `v_rates` (44.1 kHz) and `mixed_inits` (8 kHz), each first
+    at a band's `modA.z1`. This is emscripten's libm, attributed by elimination and not
+    re-evaluated.
+
+**Mutation sweep: 236 mutants, 230 caught by the parity battery, 6 accepted survivors.**
+Each survivor has a written manual argument and a caught same-site mutant (five of them
+are `repl:` replacements). The first sweep ran 231 mutants and left 12 alive. Six of
+those were real battery gaps, now closed by new scripts:
+  - `v_reset_wide` caught `reset: bands half`.
+  - `v_bus_edge` and `v_bus_mid` caught `proc: rms thr` and `proc: rms >=`.
+  - `v_squelch_edge` caught `proc: squelch <=`.
+  - `v_noise_edge` caught `proc: noise >=`.
+  - `v_wet_order` caught `proc: wet order`.
+
+Final sweep on the final battery: 236/236 run, 0 unexpected survivors, and the source is
+byte-identical to its pre-sweep copy. The arguments are mine and are not machine checked:
+  - `init: no dirty` — `dirty = 1` is followed at once by `rebuild`, which never reads it
+    and clears it as its last statement. Caught same-site: `repl: init dirty after`.
+  - `proc: always rebuild` — these are all of rebuild's inputs: band_count, freq_lo,
+    freq_hi, q, tone, spread and sr. Every write to them either sets dirty or is init.
+    Rebuild writes only band settings, which nothing else writes, and `bk_biquad_set` is
+    deterministic. So an extra rebuild recomputes the same values. Caught same-site:
+    `repl: proc never rebuild`.
+  - `bus: swap` — the bus is read only as `car_l[i] + car_r[i]`, and IEEE addition is
+    commutative, signed zeros included (the stimulus is finite). Caught same-site:
+    `bus: both l`.
+  - `proc: noise else` — `car + 0.0` and `car + -0.0` differ only for a `-0` carrier at a
+    band at or below 3 kHz. That signed zero is only the x of the `car_a` biquad, whose
+    state is only ever +0 or a sanitize result, so its output and state come out
+    identical. `v_bus_negzero` runs the case and the dumps agree. Caught same-site:
+    `repl: noise else const`.
+  - `vis: thr`, `vis: floor` — in the ladder's clamp, both thresholds and both floors
+    store the same +0. Caught same-site: `repl: vis thr high`, `repl: vis floor high`.
+
+Coverage on the final battery: gcov 100% of 238 lines, 83/83 branches executed and
+taken, 98/98 calls. ASan + UBSan + float-cast-overflow are clean. The sanitizer and -O0
+coverage dumps differ from the -O2 build only in 8 NaN sign bytes.
+
 #### What (c) means for the remaining port
 
   - Porting rules are now fixed and documented in `packages/native/include/brokodr/dsp/biquad.h`:
@@ -2092,9 +2181,11 @@ dump is byte-identical to the -O2 build.
     identical) → `talkbox` (done, effect 21 of 22: 100 checks over 50 scripts, 261/274
     mutants caught, 13 survivors argued with caught replacements, one of them UB detected
     only by the sanitizer and three resting on a Levinson bound not formally bounded for
-    rounding; identity pinned at 48/43/43). Phase 5a still owes the last effect (Vocoder)
-    and `engine` (1,093 lines of JS: Vocoder 338, `engine.js` 755), then the null-driver
-    run of the composed native engine.
+    rounding; identity pinned at 48/43/43) → `vocoder` (done, effect 22 of 22: 104
+    checks over 44 scripts, 230/236 mutants caught, 6 survivors argued with caught
+    same-site mutants; identity pinned at 42/40/40). **All 22 effects are done.** Phase
+    5a still owes `engine` (`engine.js`, 755 lines of JS, plus the effect registry that
+    the chain's `add` needs) and then the null-driver run of the composed native engine.
     Only after that is 5a green and 5b unblocked.
   - **`drum-synth` (done — see its writeup above for the result) is the first module
     deliberately ported without a JS-parity gate, and reading it is what forced the

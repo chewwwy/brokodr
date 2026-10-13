@@ -2557,13 +2557,43 @@ hardware.**
   - non-blocking pulls for visuals, loop peaks (scanned in slices), voice captures and
     the chain;
   - `render()` chunks callbacks longer than `maxBlock`.
+- **First run on the UMC1820 (2026-10-13, MSVC probe from ede5a36).** The run took
+  `--in UMC --out UMC --mic 2`, in shared mode and then with exclusive requested, at 128
+  frames, twice. **These are the first real-hardware numbers.**
+  - Enumeration works. The interface exposes 14 inputs (single jacks, pairs and IN 01-08)
+    and 7 outputs, **all at 44100 Hz in Windows**.
+  - **Shared mode was clean** in all four runs: 0 underruns, 0 capture glitches, and
+    input started 11 ms after output. The slowest callback took 62–258 us against a
+    10 ms period. But the probe forced 48000 Hz, so Windows resampled both directions,
+    the IAudioClient3 path was skipped, and the result was a 480-frame period, a
+    1124-frame buffer and **43 ms estimated round trip**. That is not the target.
+  - **Exclusive was refused** with "accepts none of float32/int24/int32/int16 at 48000
+    Hz". Exclusive mode cannot resample, and the endpoint was at 44100. The fallback and
+    the stated reason worked as designed.
+  - In one run, 34 frames of input underflowed with resampled capture. That is a
+    probable effect of resampled packet jitter, to be re-checked at the native rate.
+  - Input peak stayed at about −93 dBFS, the noise floor. Either nothing was played
+    into input 2, or the gain, phantom power or Windows privacy settings blocked it.
+    Not diagnosed yet.
+  - "UMC" picked OUT 03-04, which was simply the first endpoint Windows listed.
+- **Probe fixes from that run (57393fc).**
+  - The default rate is now the output endpoint's Windows rate; `--rate` overrides it.
+  - A name fragment now prefers the system default, then the lowest-numbered stereo
+    pair.
+  - `--mic` is checked against the endpoint's channel count.
+  - A silent-input hint names the usual causes.
+  - Console text is ASCII only: the em dash had printed as `ΓÇö` in cmd.
+  - The driver's exclusive refusal now names the rate the endpoint is actually at.
+  - **Desktop consequence:** the native host must open at the device's rate, not a fixed
+    48000. The engine is rate-agnostic.
 - **Known weak spot.** If `WasapiDevice::open` times out on a wedged driver, the
   `thread_.join()` may hang.
 - **Regression:** all 33 `verify-*.mjs`, including the new `verify-device-io`, pass.
 
 **Next:**
-1. You run the probe on the UMC1820 (the `brokodr-probe-msvc` artifact): shared and
-   exclusive at 128, with and without `--loopback` and `--fx heavy`.
+1. You re-run the probe from 57393fc at 44100: check whether IAudioClient3 grants a small
+   shared period and whether exclusive opens. Then measure with `--loopback`, test under
+   `--fx heavy`, and check the input level on input 2.
 2. `src/host.cc`, plus `tests/test-host.cc` with three gates: op-stream parity against
    JS, zero allocation in `render()` with messages in flight, and TSan on the mailbox and
    seqlock.

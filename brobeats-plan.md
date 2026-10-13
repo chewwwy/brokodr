@@ -2437,11 +2437,12 @@ gated, and the composed engine passes the null-driver run. 5b is unblocked.
   latency; it starts saying "WASAPI exclusive, 128 frames, 5.3 ms" instead of explaining
   why it can't.
 
-#### 5b progress — 2026-10-05: driver, probe and CI written; nothing measured on Windows yet
+#### 5b progress — 2026-10-05: driver, probe and MSVC CI green; nothing measured on real hardware yet
 
 Order agreed: parity build on a Windows toolchain → WASAPI driver → `brokodr-probe.exe`
 → MSVC CI job (pulled forward) → Electron 30 N-API binding → desktop wiring. The first
-four are written. **None of them has run on Windows or on real audio hardware.**
+four are done and green on MSVC CI (windows-latest). **None of them has run on real audio
+hardware.**
 
 - **Toolchain decision.** The binding and the shipping exe are built with **MSVC**.
   mingw-w64 stays in the loop here only for compile checks and Wine smoke runs, because it
@@ -2503,28 +2504,71 @@ four are written. **None of them has run on Windows or on real audio hardware.**
   - `--fx heavy` at 128 on 2 cores underruns.
 
   Only your UMC1820 can say what real USB timing does.
-- **MSVC CI (037f995), added but never run.** `.github/workflows/native-windows.yml`
-  is separate from the existing `windows-build.yml`. It runs on windows-latest with
-  `ilammy/msvc-dev-cmd`, node 24 and bun 1.3.14, and does three things:
+- **MSVC CI (037f995), green as of ede5a36 (run 38413602317).**
+  `.github/workflows/native-windows.yml` is separate from the existing `windows-build.yml`.
+  It runs on windows-latest with `ilammy/msvc-dev-cmd`, node 24 and bun 1.3.14, and does
+  three things:
   - runs every parity battery with the native half built by `cl` and classified;
   - builds and runs the device-io tests with `cl`;
   - builds `brokodr-probe.exe` with `cl` and uploads it, together with the parity log,
     as the `brokodr-probe-msvc` artifact.
 
-  Likely first-run problems:
-  - the untested msvc branch of the `cl` flags in `parity-stream.mjs`;
-  - `.ts` imports under node 24;
-  - `src/dsp/*.c` globbing for `cl` under Git Bash.
+  It took five fixes to get there:
+  - **112a4b0.** Git for Windows ships `/usr/bin/link`, which shadows MSVC's `link.exe`
+    under `shell: bash`. The job removes it.
+  - **e46381c.** A Windows absolute path is not a valid ESM specifier, so dynamic imports
+    now go through `pathToFileURL`. The classifier also prints 40 lines of a crash.
+  - **4ae2ad0.** MSVC rejects a constant `0.0/0.0` (C2124), so NaN is now produced at
+    runtime. Integer literals wider than 32 bits get explicit suffixes (C4146), and
+    `/D_CRT_SECURE_NO_WARNINGS` is set.
+  - **4de4f19.** Line endings. Windows autocrlf checked out CRLF, so every source-text
+    assertion found "0 matches"; seven batteries failed that way. The job now sets
+    `core.autocrlf false` and `core.eol lf` before checkout. **Lesson:** any test that
+    greps source must pin line endings. The same commit adds the only `KNOWN.msvc`
+    entry: `modulation` `ph_poke(`, a sub-ulp miss at 1e30 magnitude (worst 5.06e13)
+    measured against an absolute tolerance bar.
+  - **ede5a36.** `wasapi-device.cc` includes `<mmdeviceapi.h>` and `<propkeydef.h>`
+    before the devpkey header. Without them `DEFINE_PROPERTYKEY` is undefined and MSVC
+    reports C2065 `PKEY_NAME`. The mingw headers had hidden this.
+
+  **msvc: PASS.** 23 batteries: 14 clean, 8 with identity misses, and 1 (modulation)
+  with 3 known tolerance cases. 0 unexplained, 0 stale. The table shows bit-identical cases against JS:
+
+  | Battery | MSVC | Battery | MSVC | Battery | MSVC |
+  |---|---|---|---|---|---|
+  | chain | 21/21 | character | 44/62 | clock | 310/310 |
+  | delay-line | 268/268 | drive | 41/50 | drum-rack | 50/51 |
+  | drum-voice | 39/43 | dynamics | 19/57 | engine | 65/70 |
+  | eq | 32/38 | fft | 221/221 | file-player | 65/65 |
+  | looper | 77/78 | modulation | 61/83 | spectral | 47/47 |
+  | talkbox | 43/50 | time | 48/50 | utils | 88/92 |
+  | vocoder | 39/44 | | | | |
+
+  MSVC's fft and spectral are bit-identical, while mingw's are not. That is consistent
+  with, but does not prove, the x87-trig hypothesis about mingw. Device I/O is PASS
+  under `cl`.
+- **N-API binding (started, uncommitted).** `include/brokodr/host.h` declares `Host`, the
+  control-thread/audio-thread boundary the addon will wrap:
+  - a typed `Call` mailbox, with each message fenced by the command ring's write index
+    (`CommandRing::drainUntil`);
+  - an audio-thread mark-and-sweep that returns effects and buffers the engine no longer
+    references, for freeing on the control thread;
+  - meters behind a seqlock, plus scope and recording rings;
+  - non-blocking pulls for visuals, loop peaks (scanned in slices), voice captures and
+    the chain;
+  - `render()` chunks callbacks longer than `maxBlock`.
 - **Known weak spot.** If `WasapiDevice::open` times out on a wedged driver, the
   `thread_.join()` may hang.
 - **Regression:** all 33 `verify-*.mjs`, including the new `verify-device-io`, pass.
 
 **Next:**
-1. Run the CI and fix it until it is green. Fill `KNOWN.msvc` only with explained
-   failures.
-2. You run the probe on the UMC1820: shared and exclusive at 128, with and without
-   `--loopback` and `--fx heavy`.
-3. Build the N-API binding (`node-addon-api` + `cmake-js`, MSVC).
+1. You run the probe on the UMC1820 (the `brokodr-probe-msvc` artifact): shared and
+   exclusive at 128, with and without `--loopback` and `--fx heavy`.
+2. `src/host.cc`, plus `tests/test-host.cc` with three gates: op-stream parity against
+   JS, zero allocation in `render()` with messages in flight, and TSan on the mailbox and
+   seqlock.
+3. The addon (`node-addon-api` + `cmake-js`, MSVC, Electron 30), with a node smoke test
+   on Linux.
 4. Desktop wiring: the device panel shows the true mode and latency.
 
 **5c — VST3 plugin. Added 2026-10-01, your call.** It is a third target built from the

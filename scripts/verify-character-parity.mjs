@@ -28,7 +28,7 @@
 
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildAndRun, compareToJs, compareToolchains, createChecker, fillSignal } from "./lib/parity-stream.mjs";
 
@@ -209,7 +209,7 @@ try {
     src = src.replace(find, repl);
   }
   writeFileSync(contractPath, src);
-  contract = await import(`${contractPath}?t=${Date.now()}`);
+  contract = await import(`${pathToFileURL(contractPath).href}?t=${Date.now()}`);
 } finally {
   rmSync(contractPath, { force: true });
 }

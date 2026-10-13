@@ -48,7 +48,7 @@
 
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   buildAndRun,
@@ -109,7 +109,7 @@ try {
   );
   ok("the probe substitution changed the source", patched !== src);
   writeFileSync(probe, patched);
-  js = await import(`${probe}?t=${Date.now()}`);
+  js = await import(`${pathToFileURL(probe).href}?t=${Date.now()}`);
   ok("the probe exports Chain and MAX_SLOTS", typeof js.Chain === "function" && js.MAX_SLOTS === 24);
 } finally {
   rmSync(probe, { force: true });

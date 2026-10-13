@@ -25,7 +25,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCHEMA = join(root, "packages/web/src/web/audio/param-schema.ts");
@@ -41,8 +41,8 @@ if (typeof Bun === "undefined") {
   process.exit(2);
 }
 
-const { EFFECTS } = await import(SCHEMA);
-const { PAD_KEY, DRUM_KEY, LOOP_KEY, LOOPER_KEY, CLOCK_KEY, FILE_FIELD } = await import(BACKEND);
+const { EFFECTS } = await import(pathToFileURL(SCHEMA).href);
+const { PAD_KEY, DRUM_KEY, LOOP_KEY, LOOPER_KEY, CLOCK_KEY, FILE_FIELD } = await import(pathToFileURL(BACKEND).href);
 
 /*
  * The drum pads do not live in EFFECTS. A pad is not a chain slot: its params

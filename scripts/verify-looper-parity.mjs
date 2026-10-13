@@ -38,7 +38,7 @@
 
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   buildAndRun,
@@ -114,8 +114,8 @@ try {
   ok("the looper probe substitution changed the source", lpPatched !== lpSrc);
   writeFileSync(looperProbe, lpPatched);
 
-  js = await import(`${looperProbe}?t=${Date.now()}`);
-  ({ Clock } = await import(join(coreDir, "clock.js")));
+  js = await import(`${pathToFileURL(looperProbe).href}?t=${Date.now()}`);
+  ({ Clock } = await import(pathToFileURL(join(coreDir, "clock.js")).href));
   ok("the probe exports Looper and LOOP_TRACKS", typeof js.Looper === "function" && js.LOOP_TRACKS === 4);
 } finally {
   rmSync(looperProbe, { force: true });

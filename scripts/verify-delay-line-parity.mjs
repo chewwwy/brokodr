@@ -26,7 +26,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   TOL,
@@ -70,7 +70,7 @@ let js;
 try {
   const src = readFileSync(realSrc, "utf8");
   writeFileSync(probe, `${src}\nexport { makeLP as __makeLP };\n`);
-  js = await import(`${probe}?t=${Date.now()}`);
+  js = await import(`${pathToFileURL(probe).href}?t=${Date.now()}`);
   ok("delay-line.js exposes makeLP for the probe", typeof js.__makeLP === "function");
 } finally {
   rmSync(probe, { force: true });

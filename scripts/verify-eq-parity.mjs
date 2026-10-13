@@ -19,7 +19,7 @@
 
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildAndRun, compareToJs, compareToolchains, createChecker, fillSignal } from "./lib/parity-stream.mjs";
 
@@ -87,7 +87,7 @@ try {
     src = src.replace(find, repl);
   }
   writeFileSync(probePath, src);
-  probe = await import(`${probePath}?t=${Date.now()}`);
+  probe = await import(`${pathToFileURL(probePath).href}?t=${Date.now()}`);
 } finally {
   rmSync(probePath, { force: true });
 }

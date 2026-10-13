@@ -89,7 +89,12 @@ for (const f of batteries) {
   );
   for (const l of unexplained) console.log(`        unexplained: ${l.trim().slice(0, 220)}`);
   for (const k of unseen) console.log(`        known failure no longer seen (update KNOWN): ${k}`);
-  if (crashed) console.log(`        exit ${r.status}${r.signal ? ` (${r.signal})` : ""}: ${out.trim().split("\n").slice(-3).join(" | ").slice(0, 300)}`);
+  if (crashed) {
+    // The tail of a crash is usually a Node stack trace whose last lines say nothing; show
+    // enough of it to read the actual error (a failed compile prints the compiler's own).
+    console.log(`        exit ${r.status}${r.signal ? ` (${r.signal})` : ""}${r.error ? ` (${r.error.message})` : ""}:`);
+    for (const l of out.trimEnd().split("\n").slice(-40)) console.log(`        | ${l.slice(0, 300)}`);
+  }
 }
 
 const clean = rows.filter((r) => r.tol === 0 && r.ident === 0).length;

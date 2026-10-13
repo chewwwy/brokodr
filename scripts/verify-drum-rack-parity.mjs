@@ -54,7 +54,7 @@
 
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   buildAndRun,
@@ -162,7 +162,7 @@ try {
   ok("the rack probe substitution changed the source", rackPatched !== rackSrc);
   writeFileSync(rackProbe, rackPatched);
 
-  js = await import(`${rackProbe}?t=${Date.now()}`);
+  js = await import(`${pathToFileURL(rackProbe).href}?t=${Date.now()}`);
   ok("the probe exports DrumRack and PAD_COUNT", typeof js.DrumRack === "function" && js.PAD_COUNT === 16);
 } finally {
   rmSync(rackProbe, { force: true });

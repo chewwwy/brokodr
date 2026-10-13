@@ -31,7 +31,7 @@
 
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildAndRun, compareToJs, compareToolchains, createChecker, fillSignal } from "./lib/parity-stream.mjs";
 
@@ -157,7 +157,7 @@ let ref;
 let contract;
 try {
   writeFileSync(refPath, jsSrc + EXPOSE);
-  ref = await import(`${refPath}?t=${Date.now()}`);
+  ref = await import(`${pathToFileURL(refPath).href}?t=${Date.now()}`);
   let src = jsSrc;
   for (const [label, find, repl] of [...CONTRACT, ...PROBES]) {
     const n = src.split(find).length - 1;
@@ -165,7 +165,7 @@ try {
     src = src.replace(find, repl);
   }
   writeFileSync(contractPath, src + EXPOSE);
-  contract = await import(`${contractPath}?t=${Date.now()}`);
+  contract = await import(`${pathToFileURL(contractPath).href}?t=${Date.now()}`);
 } finally {
   rmSync(refPath, { force: true });
   rmSync(contractPath, { force: true });

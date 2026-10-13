@@ -73,7 +73,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 
 import { buildAndRun, createChecker, describe } from "./lib/parity-stream.mjs";
@@ -267,7 +267,7 @@ if (!existsSync(JS)) {
   console.log(`FAIL: cannot find the JS original at ${JS}`);
   process.exit(1);
 }
-const js = await import(JS);
+const js = await import(pathToFileURL(JS).href);
 const { DRUM_KINDS, DRUM_SYNTH_DEFAULTS, DEFAULT_KIT_LAYOUT, renderDrum } = js;
 
 console.log("Bro.Kodr — drum-synth.js -> C parity battery");

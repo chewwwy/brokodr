@@ -48,6 +48,14 @@ const KNOWN = {
       "native and wasm agree within tolerance",
     ],
   },
+  msvc: {
+    // ph_poke feeds a 1e30 sample into the phaser; the allpass cascade and its feedback
+    // carry ~1e29-1e30 for a while. MSVC's libm (pow/sin/cos in the coefficients) sits an
+    // ulp off glibc's in some cases (22/83 not bit-identical, all at ~1e-16 relative), and
+    // at that magnitude one ulp is ~1e14 absolute, so the absolute bar trips. Worst seen
+    // 5.06e13: under one ulp of 1e30 (1.4e14).
+    modulation: ["ph_poke(", "every case within tolerance — 82/83"],
+  },
 };
 
 const isIdentity = (line) => /identi|bit-identical/i.test(line);

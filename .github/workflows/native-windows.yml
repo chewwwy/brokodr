@@ -30,6 +30,13 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # Windows Git defaults to core.autocrlf=true, which checks the JS reference out with
+      # CRLF. The batteries assert on shipping-source text with LF regexes ("edit ... matches
+      # the shipping source exactly once"), so check out byte-for-byte as committed.
+      - name: Keep LF line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
       - uses: actions/checkout@v4
 
       # The batteries import the JS reference straight from packages/web (some of it .ts),

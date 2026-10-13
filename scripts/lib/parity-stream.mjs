@@ -24,7 +24,8 @@ export const TOL = {
   crossToolchain: 1e-6, // native vs wasm: the one users can actually hear
 };
 
-export const EMSDK = "/home/user/emsdk";
+// BK_EMSDK overrides (CI runners have none; point it anywhere empty to test that path).
+export const EMSDK = process.env.BK_EMSDK || "/home/user/emsdk";
 const NAME_LEN = 32;
 
 /** Parse a version-3 BKPARITY stream into an array of records. */
@@ -156,19 +157,92 @@ function describeChildFailure(e) {
   return msg.slice(0, 200) || "unknown failure";
 }
 
+/**
+ * Which toolchain builds and runs the "native" producer.
+ *
+ *   host  (default)  the host `cc`, run directly. This is what every battery pins.
+ *   mingw            BK_NATIVE_TOOLCHAIN=mingw: cross-build a static Windows .exe with
+ *                    mingw-w64 and run it under Wine. Every battery then checks a
+ *                    Windows binary (mingw-w64's libm and CRT) against the JS with its
+ *                    own tolerances, unchanged. That is a Windows measurement but NOT
+ *                    an MSVC one; MSVC is measured on the Windows CI runner.
+ *   msvc             BK_NATIVE_TOOLCHAIN=msvc: build with MSVC `cl` and run directly, on a
+ *                    Windows host (the CI runner). This is the shipping toolchain.
+ *
+ * The mingw build writes `<name>.exe` and `<name>-mingw.bin`, so it never clobbers the
+ * host artefacts. Identity pins are measured on the host toolchain, so a foreign
+ * toolchain may legitimately miss them; tolerance failures are the real signal there.
+ */
+export function nativeToolchain(kind = process.env.BK_NATIVE_TOOLCHAIN || "host") {
+  if (kind === "host") {
+    return {
+      label: "host cc",
+      cc: "cc",
+      exe: "",
+      dumpTag: "native",
+      build: (args, out) => execFileSync("cc", [...args, "-o", out, "-lm"], { stdio: "inherit" }),
+      run: (bin, args) => execFileSync(bin, args, { stdio: "pipe" }),
+    };
+  }
+  if (kind === "mingw") {
+    const cc = process.env.BK_MINGW_CC || "x86_64-w64-mingw32-gcc";
+    const env = {
+      ...process.env,
+      WINEDEBUG: process.env.WINEDEBUG || "-all",
+      WINEPREFIX: process.env.WINEPREFIX || `${process.env.HOME}/.wine-bk`,
+    };
+    // Wine resolves Z: to the Unix root, and Windows accepts forward slashes.
+    const winPath = (p) => (p.startsWith("/") ? `Z:${p}` : p);
+    return {
+      label: `mingw-w64 (${cc}) under Wine`,
+      cc,
+      exe: ".exe",
+      dumpTag: "mingw",
+      build: (args, out) => execFileSync(cc, [...args, "-static", "-o", out, "-lm"], { stdio: "inherit" }),
+      run: (bin, args) => execFileSync("wine", [bin, ...args.map(winPath)], { stdio: "pipe", env }),
+    };
+  }
+  if (kind === "msvc") {
+    // On a Windows host with the MSVC environment loaded (vcvars / msvc-dev-cmd).
+    // /fp:precise is MSVC's default and the one that keeps FLT_EVAL_METHOD 0 on x64;
+    // it is stated so nobody "optimises" it to /fp:fast. Objects go to a per-binary
+    // directory so two producers built in one checkout never share a .obj.
+    return {
+      label: "MSVC cl",
+      cc: "cl",
+      exe: ".exe",
+      dumpTag: "msvc",
+      build: (args, out) => {
+        const inc = [];
+        const srcs = [];
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === "-I") inc.push(`/I${args[++i]}`);
+          else if (!args[i].startsWith("-")) srcs.push(args[i]);
+        }
+        const objDir = `${out}.obj/`;
+        mkdirSync(objDir, { recursive: true });
+        execFileSync("cl", ["/nologo", "/O2", "/std:c11", "/fp:precise", "/W3", ...inc, ...srcs, `/Fo${objDir}`, `/Fe${out}`], {
+          stdio: "inherit",
+        });
+      },
+      run: (bin, args) => execFileSync(bin, args, { stdio: "pipe" }),
+    };
+  }
+  throw new Error(`BK_NATIVE_TOOLCHAIN: unknown toolchain "${kind}" (host | mingw | msvc)`);
+}
+
 export function buildAndRun({ root, name, sources, include, ok, state, emccFlags = [] }) {
   const buildDir = `${root}/packages/native/build`;
   mkdirSync(buildDir, { recursive: true });
-  const nativeBin = `${buildDir}/${name}`;
+  const tc = nativeToolchain();
+  const nativeBin = `${buildDir}/${name}${tc.exe}`;
   const wasmJs = `${buildDir}/${name}.js`;
-  const nativeDump = `${buildDir}/${name}-native.bin`;
+  const nativeDump = `${buildDir}/${name}-${tc.dumpTag}.bin`;
   const wasmDump = `${buildDir}/${name}-wasm.bin`;
 
-  console.log("== build ==");
-  execFileSync("cc", ["-std=c99", "-O2", "-Wall", "-Wextra", "-I", include, ...sources, "-o", nativeBin, "-lm"], {
-    stdio: "inherit",
-  });
-  ok("native build (cc -O2 -Wall -Wextra)", existsSync(nativeBin));
+  console.log(`== build (native toolchain: ${tc.label}) ==`);
+  tc.build(["-std=c99", "-O2", "-Wall", "-Wextra", "-I", include, ...sources], nativeBin);
+  ok(`native build (${tc.cc} -O2 -Wall -Wextra)`, existsSync(nativeBin));
 
   let haveEmcc = existsSync(`${EMSDK}/emsdk_env.sh`);
   if (haveEmcc) {
@@ -203,7 +277,7 @@ export function buildAndRun({ root, name, sources, include, ok, state, emccFlags
   // off the end of its buffers) look to a mutation run like nothing happened.
   let nativeErr = null;
   try {
-    execFileSync(nativeBin, [nativeDump], { stdio: "pipe" });
+    tc.run(nativeBin, [nativeDump]);
   } catch (e) {
     nativeErr = describeChildFailure(e);
   }

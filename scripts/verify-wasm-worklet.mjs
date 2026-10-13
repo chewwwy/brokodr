@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const buildDir = join(root, "packages/native/build");
-const emsdk = "/home/user/emsdk";
+const emsdk = process.env.BK_EMSDK || "/home/user/emsdk";
 const wasmPath = join(buildDir, "biquad-standalone.wasm");
 
 let checks = 0;

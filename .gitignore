@@ -91,6 +91,10 @@ packages/mobile/scripts/*
 # happen.
 !scripts/gen-*.mjs
 
+# The cross-toolchain parity runner (Phase 5b). Not named verify-* on purpose, so the
+# host regression glob does not run it, but CI does (BK_NATIVE_TOOLCHAIN=msvc), so it ships.
+!scripts/parity-toolchain.mjs
+
 # Shared helpers the verify scripts import (the parity stream reader, etc). Same
 # two-line shape as above and for the same reason: the directory must be
 # un-ignored before any negation inside it is even looked at.

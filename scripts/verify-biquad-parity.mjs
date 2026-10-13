@@ -30,10 +30,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { nativeToolchain } from "./lib/parity-stream.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const buildDir = join(root, "packages/native/build");
-const emsdk = "/home/user/emsdk";
+const emsdk = process.env.BK_EMSDK || "/home/user/emsdk";
 
 let checks = 0;
 let failures = 0;
@@ -68,14 +69,17 @@ const srcs = [
   join(root, "packages/native/tests/parity-biquad.c"),
 ];
 
-const nativeBin = join(buildDir, "parity-biquad");
+// BK_NATIVE_TOOLCHAIN=mingw builds a Windows .exe and runs it under Wine (see
+// nativeToolchain in lib/parity-stream.mjs); the host build is the default.
+const tc = nativeToolchain();
+const nativeBin = join(buildDir, `parity-biquad${tc.exe}`);
 const wasmJs = join(buildDir, "parity-biquad.js");
-const nativeDump = join(buildDir, "parity-native.bin");
+const nativeDump = join(buildDir, tc.exe ? `parity-${tc.dumpTag}.bin` : "parity-native.bin");
 const wasmDump = join(buildDir, "parity-wasm.bin");
 
-console.log("== 1. build ==");
-execFileSync("cc", ["-std=c99", "-O2", "-I", inc, ...srcs, "-o", nativeBin, "-lm"], { stdio: "inherit" });
-ok("native build (cc -O2)", existsSync(nativeBin));
+console.log(`== 1. build (native toolchain: ${tc.label}) ==`);
+tc.build(["-std=c99", "-O2", "-I", inc, ...srcs], nativeBin);
+ok(`native build (${tc.cc} -O2)`, existsSync(nativeBin));
 
 // Emscripten needs NODERAWFS to let the wasm build write the dump straight to
 // disk, so both producers are byte-comparable artefacts rather than one being
@@ -106,7 +110,7 @@ ok("wasm build (emcc -O2)", haveEmcc && existsSync(wasmJs));
 console.log("\n== 2. run producers ==");
 rmSync(nativeDump, { force: true });
 rmSync(wasmDump, { force: true });
-execFileSync(nativeBin, [nativeDump], { stdio: "pipe" });
+tc.run(nativeBin, [nativeDump]);
 ok("native producer wrote a dump", existsSync(nativeDump));
 
 if (haveEmcc) {

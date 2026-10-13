@@ -54,6 +54,19 @@ struct StreamConfig {
   DriverKind kind = DriverKind::Offline;
   /** Ask for exclusive mode. Advisory: the driver may report back that it fell back. */
   bool wantExclusive = false;
+  /**
+   * Endpoint ids from enumerate(). Empty means the system default for that direction.
+   * WASAPI endpoints are one-directional, so a duplex stream is two of them, even on one
+   * interface. inputId "none" opens render only (the engine hears silence).
+   */
+  std::string inputId;
+  std::string outputId;
+  /**
+   * Which capture channels feed the engine's L and R. The UMC1820 mic on input 2 is a
+   * mono source on channel 1 of the "1&2" pair: inputChannelL = inputChannelR = 1.
+   */
+  uint32_t inputChannelL = 0;
+  uint32_t inputChannelR = 1;
 };
 
 /** What the device layer actually achieved, as opposed to what was requested. */
@@ -62,13 +75,42 @@ struct StreamStatus {
   DriverKind kind = DriverKind::Offline;
   uint32_t sampleRate = 0;
   uint32_t blockFrames = 0;
-  /** Measured, not computed from the block size — the UI shows this number verbatim. */
+  /**
+   * Measured, not computed from the block size — the UI shows this number verbatim. Zero
+   * until something has measured it (brokodr-probe --loopback does, with a cable or the
+   * monitor of the output).
+   */
   double roundTripMs = 0.0;
+  /**
+   * What the driver can state without measuring: both endpoint buffers, both reported
+   * stream latencies and the duplex FIFO target. Labelled as an estimate wherever shown.
+   */
+  double estimatedRoundTripMs = 0.0;
+  /** The endpoint period and buffer actually granted, in frames, and the sample format. */
+  uint32_t periodFrames = 0;
+  uint32_t bufferFrames = 0;
+  std::string format;
+  std::string inputName;
+  std::string outputName;
   /** Set when exclusive was requested and refused, with the reason, e.g. another client. */
   bool exclusiveDenied = false;
   std::string note;
   /** Callbacks that overran their budget. Non-zero means the user heard something. */
   uint64_t underruns = 0;
+  /** Device callbacks so far, and the slowest one's work time (engine + conversion). */
+  uint64_t callbacks = 0;
+  double maxCallbackUs = 0.0;
+  /** Capture-side faults: device-reported discontinuities, FIFO underflow/overflow/trim. */
+  uint64_t captureGlitches = 0;
+  uint64_t inputUnderflowFrames = 0;
+  uint64_t inputDroppedFrames = 0;
+  /**
+   * How long the input took to deliver its first packet, in ms of output rendered; the
+   * engine heard silence meanwhile. Still growing while open means the input never
+   * started (wrong pair, privacy setting, a driver that needs the render side first).
+   */
+  double inputWarmupMs = 0.0;
+  bool inputStarted = false;
 };
 
 /**
@@ -103,6 +145,15 @@ class Device {
  * tail behaviour (reverb decay, loop playback, a click track with no input) gets tested.
  */
 Device* makeOfflineDriver(const std::string& inputPath, const std::string& outputPath, uint32_t silentFrames = 0);
+
+#ifdef _WIN32
+/**
+ * WASAPI, event-driven, shared or exclusive (see wasapi-device.cc). All COM work happens
+ * on the driver's own audio thread, so the caller's COM apartment (Electron's main thread
+ * is an STA) does not matter. status() is safe to call from any thread while streaming.
+ */
+Device* makeWasapiDriver();
+#endif
 
 }  // namespace brokodr
 

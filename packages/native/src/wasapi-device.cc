@@ -267,6 +267,7 @@ HRESULT initExclusive(Endpoint& ep, uint32_t rate, uint32_t block, std::string& 
   hr = ep.client->GetMixFormat(&mix);
   if (FAILED(hr)) return reason = hrReason(hr, rate, block), hr;
   const uint32_t channels = mix->nChannels;
+  const uint32_t mixRate = mix->nSamplesPerSec;
   CoTaskMemFree(mix);
 
   // Float first (no conversion), then 24-in-32 (what most USB interfaces expose), packed
@@ -283,7 +284,15 @@ HRESULT initExclusive(Endpoint& ep, uint32_t rate, uint32_t block, std::string& 
       break;
     }
   }
-  if (!found) return reason = hrReason(AUDCLNT_E_UNSUPPORTED_FORMAT, rate, block), AUDCLNT_E_UNSUPPORTED_FORMAT;
+  if (!found) {
+    reason = hrReason(AUDCLNT_E_UNSUPPORTED_FORMAT, rate, block);
+    // The usual cause: exclusive mode cannot resample, and Windows has the endpoint at
+    // another rate (the UMC1820 ships at 44100). Say which, so the fix is one setting.
+    if (mixRate != rate)
+      reason += " (Windows has this endpoint at " + std::to_string(mixRate) + " Hz; open at that rate, or change it "
+                "in Sound settings > device Properties > Advanced)";
+    return AUDCLNT_E_UNSUPPORTED_FORMAT;
+  }
 
   REFERENCE_TIME defP = 0, minP = 0;
   ep.client->GetDevicePeriod(&defP, &minP);

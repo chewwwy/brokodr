@@ -40,7 +40,7 @@ namespace {
 struct Options {
   bool list = false;
   bool shared = true, exclusive = true;
-  uint32_t frames = 128, rate = 48000;
+  uint32_t frames = 128, rate = 0;  // 0: the output endpoint's Windows rate
   double seconds = 5.0;
   std::string in, out;
   int mic = 0;  // 1-based device channel feeding both engine inputs; 0 = channels 1 and 2
@@ -54,7 +54,7 @@ void usage() {
       "  --list                 list WASAPI endpoints and exit\n"
       "  --mode M               shared | exclusive | both (default both)\n"
       "  --frames N             engine block / requested period in frames (default 128)\n"
-      "  --rate HZ              sample rate (default 48000)\n"
+      "  --rate HZ              sample rate (default: the rate Windows has the output at)\n"
       "  --seconds S            run time per mode (default 5)\n"
       "  --in X / --out X       endpoint: list index, id, or part of the name (default: system\n"
       "                         default). --in none opens output only.\n"
@@ -122,7 +122,7 @@ bool parse(int argc, char** argv, Options& o) {
       return false;
     }
   }
-  if (o.frames < 16 || o.frames > 4096 || o.rate < 8000 || o.seconds <= 0) {
+  if (o.frames < 16 || o.frames > 4096 || (o.rate != 0 && o.rate < 8000) || o.seconds <= 0) {
     std::fprintf(stderr, "frames must be 16..4096, rate >= 8000, seconds > 0\n");
     return false;
   }
@@ -135,34 +135,67 @@ std::string lower(std::string s) {
   return s;
 }
 
-/** Resolve --in/--out: "" (default), "none", a list index, an exact id, or a name fragment. */
+/**
+ * Resolve --in/--out: "" (default), "none", a list index, an exact id, or a name fragment.
+ * `index` gets the chosen list entry (-1 for "none"; the system default for "").
+ *
+ * A fragment like "UMC" matches every pair the interface exposes, in whatever order
+ * Windows enumerates them, so the first hit is arbitrary (it picked OUT 03-04 on the
+ * UMC1820). Preference: the system default if it matches, else the stereo endpoints, and
+ * among those the lowest name, which is the "01-02" pair on every interface that numbers
+ * its pairs.
+ */
 bool resolve(const std::vector<brokodr::DeviceInfo>& devs, const std::string& want, bool capture, std::string& id,
-             std::string& err) {
+             int& index, std::string& err) {
   id.clear();
-  if (want.empty() || want == "none") return id = want, true;
-  bool digits = !want.empty();
+  index = -1;
+  auto isCap = [&](size_t i) { return devs[i].inputChannels > 0; };
+  auto channels = [&](size_t i) { return isCap(i) ? devs[i].inputChannels : devs[i].outputChannels; };
+  if (want == "none") return id = want, true;
+  if (want.empty()) {
+    for (size_t i = 0; i < devs.size(); i++)
+      if (isCap(i) == capture && devs[i].isDefault) index = static_cast<int>(i);
+    return true;
+  }
+  bool digits = true;
   for (char c : want) digits = digits && c >= '0' && c <= '9';
   if (digits) {
     const size_t i = static_cast<size_t>(std::atoi(want.c_str()));
     if (i < devs.size()) {
-      const bool isCap = devs[i].inputChannels > 0;
-      if (isCap != capture) return err = "endpoint " + want + " is not an " + (capture ? "input" : "output"), false;
+      if (isCap(i) != capture) return err = "endpoint " + want + " is not an " + (capture ? "input" : "output"), false;
+      index = static_cast<int>(i);
       return id = devs[i].id, true;
     }
     return err = "no endpoint " + want, false;
   }
   std::vector<size_t> hits;
   for (size_t i = 0; i < devs.size(); i++) {
-    const bool isCap = devs[i].inputChannels > 0;
-    if (isCap != capture) continue;
-    if (devs[i].id == want) return id = devs[i].id, true;
+    if (isCap(i) != capture) continue;
+    if (devs[i].id == want) {
+      index = static_cast<int>(i);
+      return id = devs[i].id, true;
+    }
     if (lower(devs[i].name).find(lower(want)) != std::string::npos) hits.push_back(i);
   }
   if (hits.empty()) return err = std::string("no ") + (capture ? "input" : "output") + " matching '" + want + "'", false;
+  size_t pick = hits[0];
+  const char* why = "first match";
+  bool found = false;
+  for (size_t i : hits)
+    if (devs[i].isDefault) pick = i, why = "the system default", found = true;
+  if (!found) {
+    for (size_t i : hits) {
+      if (channels(i) != 2) continue;
+      if (!found || devs[i].name < devs[pick].name) pick = i;
+      found = true;
+    }
+    if (found) why = "lowest-numbered stereo pair";
+  }
   if (hits.size() > 1)
-    std::printf("  note: '%s' matches %zu %s endpoints, using [%zu] %s\n", want.c_str(), hits.size(),
-                capture ? "input" : "output", hits[0], devs[hits[0]].name.c_str());
-  id = devs[hits[0]].id;
+    std::printf("  note: '%s' matches %zu %s endpoints, using [%zu] %s (%s; pass the list index to choose)\n",
+                want.c_str(), hits.size(), capture ? "input" : "output", pick, devs[pick].name.c_str(), why);
+  index = static_cast<int>(pick);
+  id = devs[pick].id;
   return true;
 }
 
@@ -357,13 +390,16 @@ int runMode(const Options& o, bool exclusive, const std::string& inId, const std
   std::printf("  open took         %.0f ms\n", openMs);
   const int ticks = static_cast<int>(std::ceil(o.seconds));
   uint64_t lastUnder = 0;
+  double runPeak = 0.0;
   for (int k = 0; k < ticks; k++) {
     std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(1000.0 * o.seconds / ticks)));
     const brokodr::StreamStatus s = dev->status();
+    const double pk = sink.inputPeak();
+    runPeak = std::max(runPeak, pk);
     std::printf("  t=%2ds  callbacks %7llu  slowest %5.0f us  underruns %llu%s  input peak %6.1f dBFS%s\n", k + 1,
                 static_cast<unsigned long long>(s.callbacks), s.maxCallbackUs,
                 static_cast<unsigned long long>(s.underruns), s.underruns > lastUnder ? " (+)" : "",
-                dbfs(sink.inputPeak()), s.open ? "" : "  STREAM CLOSED");
+                dbfs(pk), s.open ? "" : "  STREAM CLOSED");
     lastUnder = s.underruns;
     if (!s.open) break;
   }
@@ -372,7 +408,13 @@ int runMode(const Options& o, bool exclusive, const std::string& inId, const std
   delete dev;
   printCounters(s, o.seconds);
   int rc = s.callbacks == 0 ? 1 : 0;
-  if (s.callbacks == 0) std::printf("  FAIL no callbacks — the device never asked for audio\n");
+  if (s.callbacks == 0) std::printf("  FAIL no callbacks - the device never asked for audio\n");
+  if (s.inputName != "(none)" && s.inputStarted && dbfs(runPeak) < -80.0 && !o.loopback)
+    std::printf("  input level       SILENT (peak %.1f dBFS is the noise floor). Make a sound during the run;\n"
+                "                    if it stays silent check the channel (--mic N is the jack number), the\n"
+                "                    gain knob, 48V for a condenser, and Settings > Privacy > Microphone >\n"
+                "                    'Let desktop apps access your microphone'.\n",
+                dbfs(runPeak));
   if (o.loopback) {
     const int n = sink.hits();
     if (n == 0) {
@@ -393,7 +435,7 @@ int runMode(const Options& o, bool exclusive, const std::string& inId, const std
                                               ? "clean"
                                               : s.callbacks == 0      ? "no audio"
                                               : !s.inputStarted        ? "INPUT NEVER STARTED"
-                                                                       : "GLITCHES — see counters");
+                                                                       : "GLITCHES - see counters");
   return rc;
 }
 #endif
@@ -428,10 +470,32 @@ int main(int argc, char** argv) {
     return 0;
   }
   std::string inId, outId, err;
-  if (!resolve(devs, o.in, true, inId, err) || !resolve(devs, o.out, false, outId, err)) {
+  int inIx = -1, outIx = -1;
+  if (!resolve(devs, o.in, true, inId, inIx, err) || !resolve(devs, o.out, false, outId, outIx, err)) {
     std::printf("FAIL %s\n", err.c_str());
     return 2;
   }
+  // Default rate: whatever Windows runs the output endpoint at. Shared mode then needs no
+  // resampler (and IAudioClient3 low-latency periods become possible), and exclusive mode,
+  // which cannot resample, has a chance. The input is resampled by Windows if it differs.
+  if (o.rate == 0) {
+    o.rate = outIx >= 0 && devs[outIx].defaultSampleRate ? devs[outIx].defaultSampleRate : 48000;
+    std::printf("\nrate %u Hz (%s)\n", o.rate,
+                outIx >= 0 ? "the output endpoint's Windows rate; --rate overrides" : "fallback; --rate overrides");
+  } else {
+    std::printf("\nrate %u Hz (--rate)\n", o.rate);
+  }
+  if (inIx >= 0 && devs[inIx].defaultSampleRate && devs[inIx].defaultSampleRate != o.rate)
+    std::printf("  note: Windows has the input at %u Hz; shared mode will resample it\n", devs[inIx].defaultSampleRate);
+  if (o.mic > 0 && inIx >= 0 && static_cast<uint32_t>(o.mic) > devs[inIx].inputChannels) {
+    std::printf("FAIL --mic %d, but %s has %u channel(s). Pick the endpoint for that jack's pair, e.g. the\n"
+                "     'IN 01-02' endpoint with --mic 2 for input 2.\n",
+                o.mic, devs[inIx].name.c_str(), devs[inIx].inputChannels);
+    return 2;
+  }
+  if (o.mic > 0)
+    std::printf("input: device channel %d of %s to both engine channels\n", o.mic,
+                inIx >= 0 ? devs[inIx].name.c_str() : "the default input");
   std::printf("\nengine output %s%s%s\n", o.monitor ? "MONITORED (audible)" : "muted (pass --monitor to hear it)",
               o.tone ? ", test tone on" : "", o.loopback ? ", loopback click train" : "");
   int rc = 0;

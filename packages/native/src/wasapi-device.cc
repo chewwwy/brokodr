@@ -36,8 +36,13 @@
 #include <initguid.h>
 #include <audioclient.h>
 #include <avrt.h>
-#include <functiondiscoverykeys_devpkey.h>
+// mmdeviceapi.h (via propsys.h) and propkeydef.h define DEFINE_PROPERTYKEY, which the
+// devpkey header uses but does not include. WIN32_LEAN_AND_MEAN drops the path that
+// pulls it in through windows.h; mingw's headers happen to include it anyway, MSVC's
+// do not (C2065 PKEY_NAME).
 #include <mmdeviceapi.h>
+#include <propkeydef.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <mmreg.h>
 
 #include <atomic>

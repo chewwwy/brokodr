@@ -2437,6 +2437,96 @@ gated, and the composed engine passes the null-driver run. 5b is unblocked.
   latency; it starts saying "WASAPI exclusive, 128 frames, 5.3 ms" instead of explaining
   why it can't.
 
+#### 5b progress — 2026-10-05: driver, probe and CI written; nothing measured on Windows yet
+
+Order agreed: parity build on a Windows toolchain → WASAPI driver → `brokodr-probe.exe`
+→ MSVC CI job (pulled forward) → Electron 30 N-API binding → desktop wiring. The first
+four are written. **None of them has run on Windows or on real audio hardware.**
+
+- **Toolchain decision.** The binding and the shipping exe are built with **MSVC**.
+  mingw-w64 stays in the loop here only for compile checks and Wine smoke runs, because it
+  is the Windows toolchain this machine can run.
+- **Parity on a Windows toolchain (mingw, 1f7a08e).** The batteries now take
+  `BK_NATIVE_TOOLCHAIN=host|mingw|msvc`, and `BK_EMSDK` overrides the emsdk path. When
+  emcc is missing, as on CI, the wasm half is skipped. `scripts/parity-toolchain.mjs` runs
+  all 23 batteries and classifies each FAIL line:
+  - identity misses are reported, not failed, because the pins were taken on glibc,
+    emscripten and V8;
+  - a tolerance failure fails the run unless it is listed in `KNOWN[toolchain]` with a
+    reason;
+  - a KNOWN entry that stops failing also fails the run, so the list cannot go stale.
+
+  **mingw: PASS.** 23 batteries: 12 clean, 11 with identity misses only, and 0
+  unexplained tolerance failures. The two known families:
+  - **fft (11).** mingw-w64's `cos(fl(pi/2))` is 6.1230317691e-17, against glibc's and
+    V8's 6.1232339957e-17. That is 3.3e-5 relative but only 2e-21 absolute. The twiddle
+    bar is relative on purpose, to surface this.
+  - **spectral (5).** In `pf_pitch_huge` (+1000 semitones), mingw's trig mis-reduces huge
+    arguments. In `pf_quality`, ulp-level state drift follows from the twiddles.
+
+  My explanation, x87-style trig in mingw's libm, is a hypothesis I have not verified. MSVC
+  has its own libm and is unmeasured. `KNOWN.msvc` starts empty.
+- **PCM conversion and duplex pump (84f1ff8), portable and tested on Linux.**
+  - `pcm.h` covers float32, int16, packed int24, int32 and 24-in-32, in and out, with
+    clamping and rounding.
+  - `duplex.h` is the capture→render FIFO. It holds a target fill, trims on overflow and
+    **re-primes to target after an underflow**. Without the re-prime, a −500 ppm capture
+    clock produced 960 underflow events; with it, 2.
+  - Before the first capture packet the pump is in a **warm-up** state. That state is not
+    counted as underflow; it is reported as `warmupFrames`, and `started()` is exposed.
+    `StreamStatus` gains `inputWarmupMs` and `inputStarted`.
+  - `tests/test-device-io.cc` runs 93 checks, zero allocation in the pump, clean under
+    ASan+UBSan and as a mingw build under Wine. 14/14 mutants are caught.
+- **WASAPI driver and probe (55f950c).**
+  - **Shared mode is the default.** It uses `IAudioClient3` for low-period shared mode
+    when the endpoint offers it.
+  - **Exclusive is opt-in.** If the lock fails, it falls back to shared with a stated
+    reason.
+  - The driver handles duplex through the pump and runs an MMCSS "Pro Audio" thread that
+    does not allocate, lock, log or throw. It reports glitch, underrun and re-prime
+    counters, which reset on `open()`. A first-packet discontinuity is not counted.
+  - `tools/brokodr-probe.cc` lists endpoints, opens a requested mode, period and fx load,
+    and prints the **granted** mode, period, buffer and latency, the counters and, with
+    `--loopback`, a measured round trip. Engine output is muted unless `--monitor` is
+    passed.
+  - `scripts/verify-device-io.mjs` gates the work:
+    - host build, sanitizers, and the mingw build under Wine;
+    - all 28 units cross-built with `-Werror` and linked;
+    - a Wine probe smoke run: list, render-only shared @128 clean, exclusive refused →
+      shared with a reason, duplex @480 with fx opening and starting input, and a bad
+      `--fx` refused.
+
+  **Wine observations. These are not Windows measurements.**
+  - `IAudioClient3` grants a 128-frame period with a 384-frame buffer.
+  - Duplex at 128 is bursty: 10–20 ms round trip, with trims and re-primes.
+  - Input starts about 1.5 s after output.
+  - `--fx heavy` at 128 on 2 cores underruns.
+
+  Only your UMC1820 can say what real USB timing does.
+- **MSVC CI (037f995), added but never run.** `.github/workflows/native-windows.yml`
+  is separate from the existing `windows-build.yml`. It runs on windows-latest with
+  `ilammy/msvc-dev-cmd`, node 24 and bun 1.3.14, and does three things:
+  - runs every parity battery with the native half built by `cl` and classified;
+  - builds and runs the device-io tests with `cl`;
+  - builds `brokodr-probe.exe` with `cl` and uploads it, together with the parity log,
+    as the `brokodr-probe-msvc` artifact.
+
+  Likely first-run problems:
+  - the untested msvc branch of the `cl` flags in `parity-stream.mjs`;
+  - `.ts` imports under node 24;
+  - `src/dsp/*.c` globbing for `cl` under Git Bash.
+- **Known weak spot.** If `WasapiDevice::open` times out on a wedged driver, the
+  `thread_.join()` may hang.
+- **Regression:** all 33 `verify-*.mjs`, including the new `verify-device-io`, pass.
+
+**Next:**
+1. Run the CI and fix it until it is green. Fill `KNOWN.msvc` only with explained
+   failures.
+2. You run the probe on the UMC1820: shared and exclusive at 128, with and without
+   `--loopback` and `--fx heavy`.
+3. Build the N-API binding (`node-addon-api` + `cmake-js`, MSVC).
+4. Desktop wiring: the device panel shows the true mode and latency.
+
 **5c — VST3 plugin. Added 2026-10-01, your call.** It is a third target built from the
 same C core. The `.exe` stays the product, and the VST3 is the same rack loaded inside a
 DAW.

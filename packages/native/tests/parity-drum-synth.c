@@ -622,7 +622,7 @@ int main(int argc, char **argv) {
        silently stops testing what it claims the moment the table is
        edited. */
     if (strcmp(c->name, "kick-level-nan") == 0) {
-      p.level = (double)(0.0 / 0.0);
+      p.level = bk_test_nan();
     }
     if (strcmp(c->name, "kick-click-inf") == 0) {
       p.click = (double)INFINITY;

@@ -76,7 +76,7 @@ jobs:
           mkdir -p build/msvc
           # Dash-style cl options: Git Bash (MSYS) rewrites arguments that start with "/"
           # as paths. Node's execFileSync in parity-stream.mjs has no such problem.
-          cl -nologo -O2 -std:c++17 -EHsc -W3 -Iinclude tests/test-device-io.cc \
+          cl -nologo -O2 -std:c++17 -EHsc -W3 -D_CRT_SECURE_NO_WARNINGS -Iinclude tests/test-device-io.cc \
              -Fobuild/msvc/ -Febuild/msvc/test-device-io.exe
           build/msvc/test-device-io.exe
 
@@ -85,8 +85,8 @@ jobs:
         working-directory: packages/native
         run: |
           mkdir -p build/msvc/c build/msvc/cc
-          cl -nologo -c -O2 -std:c11 -fp:precise -W3 -Iinclude src/dsp/*.c -Fobuild/msvc/c/
-          cl -nologo -O2 -std:c++17 -EHsc -W3 -Iinclude \
+          cl -nologo -c -O2 -std:c11 -fp:precise -W3 -D_CRT_SECURE_NO_WARNINGS -Iinclude src/dsp/*.c -Fobuild/msvc/c/
+          cl -nologo -O2 -std:c++17 -EHsc -W3 -D_CRT_SECURE_NO_WARNINGS -Iinclude \
              src/wasapi-device.cc src/offline-device.cc src/wav.cc tools/brokodr-probe.cc \
              build/msvc/c/*.obj -Fobuild/msvc/cc/ -Febuild/msvc/brokodr-probe.exe \
              -link ole32.lib avrt.lib uuid.lib oleaut32.lib ksuser.lib

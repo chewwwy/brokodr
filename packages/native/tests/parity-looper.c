@@ -140,7 +140,7 @@ static void build_src(int frames, int mode) {
     if (mode == SRC_HUGE) src_ml[i] = (float)(noise[n & (SRC_LEN - 1)] * 4e29);
   }
   if (mode == SRC_DIRTY) {
-    if (frames > 5) src_ml[5] = (float)(0.0 / 0.0);
+    if (frames > 5) src_ml[5] = (float)bk_test_nan();
     if (frames > 9) src_ml[9] = (float)1e40;
     if (frames > 11) src_ml[11] = -0.0f;
     if (frames > 17) src_mr[17] = (float)(-1e40);

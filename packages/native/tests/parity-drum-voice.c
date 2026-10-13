@@ -113,7 +113,7 @@ static void build_buf(float *dst, int n, int kind) {
     /* Planted at fixed indices so both sides agree exactly. 1e40 does not fit
        a float32 and becomes +inf on every toolchain and in a Float32Array
        alike, which is the point — the voice has to survive it. */
-    if (n > 3) dst[3] = (float)(0.0 / 0.0);
+    if (n > 3) dst[3] = (float)bk_test_nan();
     if (n > 5) dst[5] = (float)1e40;
     if (n > 7) dst[7] = -0.0f;
     if (n > 9) dst[9] = 0.0f;

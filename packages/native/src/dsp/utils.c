@@ -10,18 +10,29 @@
 
 /* --- scalar helpers ----------------------------------------------------- */
 
+/* 0.0 / 0.0, evaluated at run time. A constant 0.0 / 0.0 is a compile error on MSVC
+   (C2124), and NAN is not a drop-in: it is +qNaN, while gcc folds 0.0 / 0.0 to x86's
+   default -qNaN, so swapping would change pinned bits on the host. Through a volatile it
+   stays a real divide everywhere: -qNaN on x86 (gcc and MSVC alike), +qNaN on wasm,
+   exactly the bits each toolchain produced before. Only reached on a NaN argument. */
+static double bk_nan_rt(void) {
+  volatile double z = 0.0;
+  return z / z;
+}
+
+
 double bk_clamp(double x, double lo, double hi) {
   return x < lo ? lo : (x > hi ? hi : x);
 }
 
 double bk_max(double a, double b) {
   /* Math.max(NaN, x) and Math.max(x, NaN) are both NaN. */
-  if (a != a || b != b) return (double)(0.0 / 0.0);
+  if (a != a || b != b) return bk_nan_rt();
   return a > b ? a : b;
 }
 
 double bk_min(double a, double b) {
-  if (a != a || b != b) return (double)(0.0 / 0.0);
+  if (a != a || b != b) return bk_nan_rt();
   return a < b ? a : b;
 }
 

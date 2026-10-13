@@ -57,6 +57,14 @@ enum {
 
 static unsigned int bk_parity_records = 0;
 
+/* A run-time 0.0 / 0.0, for injecting NaN into test input. A constant 0.0 / 0.0 does not
+   compile on MSVC (C2124), and NAN has the opposite sign bit to what gcc folds 0.0 / 0.0
+   to, so the volatile keeps every toolchain's pinned bits unchanged (see utils.c). */
+static inline double bk_test_nan(void) {
+  volatile double z = 0.0;
+  return z / z;
+}
+
 static void bk_w_u32(FILE *f, unsigned int v) { fwrite(&v, 4, 1, f); }
 
 /* Deterministic stimulus. The LCG runs on uint32 so JS can reproduce it bit for

@@ -221,7 +221,7 @@ export function nativeToolchain(kind = process.env.BK_NATIVE_TOOLCHAIN || "host"
         }
         const objDir = `${out}.obj/`;
         mkdirSync(objDir, { recursive: true });
-        execFileSync("cl", ["/nologo", "/O2", "/std:c11", "/fp:precise", "/W3", ...inc, ...srcs, `/Fo${objDir}`, `/Fe${out}`], {
+        execFileSync("cl", ["/nologo", "/O2", "/std:c11", "/fp:precise", "/W3", "/D_CRT_SECURE_NO_WARNINGS", ...inc, ...srcs, `/Fo${objDir}`, `/Fe${out}`], {
           stdio: "inherit",
         });
       },

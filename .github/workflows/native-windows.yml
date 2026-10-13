@@ -49,10 +49,15 @@ jobs:
         with:
           arch: x64
 
+      # Under `shell: bash` Actions prepends Git's /usr/bin to PATH at every step, and its
+      # /usr/bin/link (GNU ln-alike) then shadows MSVC's link.exe, which cl invokes to link.
+      # The workaround msvc-dev-cmd's README recommends is to remove it.
       - name: Toolchain
         shell: bash
         run: |
-          cl 2>&1 | head -1
+          rm -f /usr/bin/link /usr/bin/link.exe
+          type -a link || true
+          cl 2>&1 | head -1 || true
           node --version
 
       - name: Parity batteries (native = MSVC)

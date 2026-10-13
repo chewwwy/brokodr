@@ -1,0 +1,99 @@
+name: Native core (Windows, MSVC)
+
+# Phase 5b. The native engine ships on Windows built by MSVC, so this is where that build
+# is measured. Measured, not assumed: the parity pins were taken on glibc / emscripten / V8,
+# and mingw-w64's libm already showed real (tolerance) differences in the FFT twiddles and
+# huge-argument trig (brobeats-plan.md, Phase 5b). This job is the first MSVC number.
+#
+#   1. every DSP parity battery, native half built with `cl` (/O2 /fp:precise), classified
+#      by scripts/parity-toolchain.mjs (identity misses reported, unexplained tolerance
+#      failures fail the job). The runner has no emscripten, so the wasm half is skipped.
+#   2. tests/test-device-io.cc (PCM conversion + duplex pump) built with cl and run.
+#   3. tools/brokodr-probe.exe built with cl and uploaded: the WASAPI probe to run on a real
+#      machine. The runner has no audio hardware, so the probe is only built here.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "packages/native/**"
+      - "scripts/lib/parity-stream.mjs"
+      - "scripts/parity-toolchain.mjs"
+      - "scripts/verify-*-parity.mjs"
+      - "packages/web/public/dsp/**"
+      - ".github/workflows/native-windows.yml"
+
+jobs:
+  msvc:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The batteries import the JS reference straight from packages/web (some of it .ts),
+      # which needs a Node with type stripping on by default (>= 23.6).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Toolchain
+        shell: bash
+        run: |
+          cl 2>&1 | head -1
+          node --version
+
+      - name: Parity batteries (native = MSVC)
+        shell: bash
+        env:
+          BK_NATIVE_TOOLCHAIN: msvc
+          BK_EMSDK: none
+        run: |
+          set -o pipefail
+          node scripts/parity-toolchain.mjs 2>&1 | tee parity-msvc.txt
+
+      - name: Device I/O tests (pcm + duplex)
+        shell: bash
+        working-directory: packages/native
+        run: |
+          mkdir -p build/msvc
+          # Dash-style cl options: Git Bash (MSYS) rewrites arguments that start with "/"
+          # as paths. Node's execFileSync in parity-stream.mjs has no such problem.
+          cl -nologo -O2 -std:c++17 -EHsc -W3 -Iinclude tests/test-device-io.cc \
+             -Fobuild/msvc/ -Febuild/msvc/test-device-io.exe
+          build/msvc/test-device-io.exe
+
+      - name: Build brokodr-probe.exe
+        shell: bash
+        working-directory: packages/native
+        run: |
+          mkdir -p build/msvc/c build/msvc/cc
+          cl -nologo -c -O2 -std:c11 -fp:precise -W3 -Iinclude src/dsp/*.c -Fobuild/msvc/c/
+          cl -nologo -O2 -std:c++17 -EHsc -W3 -Iinclude \
+             src/wasapi-device.cc src/offline-device.cc src/wav.cc tools/brokodr-probe.cc \
+             build/msvc/c/*.obj -Fobuild/msvc/cc/ -Febuild/msvc/brokodr-probe.exe \
+             -link ole32.lib avrt.lib uuid.lib oleaut32.lib ksuser.lib
+          build/msvc/brokodr-probe.exe --help
+
+      - name: Upload probe and parity log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: brokodr-probe-msvc
+          path: |
+            packages/native/build/msvc/brokodr-probe.exe
+            parity-msvc.txt
+          if-no-files-found: warn
+          retention-days: 30

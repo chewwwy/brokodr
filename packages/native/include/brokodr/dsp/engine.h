@@ -91,6 +91,9 @@ enum { BK_FILE_ROUTE_OFF = 0, BK_FILE_ROUTE_INPUT = 1, BK_FILE_ROUTE_CARRIER = 2
 enum { BK_DRUM_ROUTE_OFF = 0, BK_DRUM_ROUTE_DIRECT = 1, BK_DRUM_ROUTE_CHAIN = 2 };
 
 /* The fields of the "io" verb, numbered as IO_FIELD in worklet-processor.js. */
+/* Shared with layout.h (same names, same values): whichever is included first declares them. */
+#ifndef BK_IO_FIELDS_DECLARED
+#define BK_IO_FIELDS_DECLARED
 enum {
   BK_IO_IN_GAIN = 0,
   BK_IO_OUT_GAIN = 1,
@@ -100,6 +103,7 @@ enum {
   BK_IO_SWAP = 5,
   BK_IO_MASTER_MIX = 6
 };
+#endif
 
 /* Which chain an fx verb addresses: the master rack, a pad's ("padfx") or a
    loop track's ("loopfx"). */

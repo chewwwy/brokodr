@@ -59,6 +59,10 @@ enum bk_op {
 };
 
 // I/O stage fields. Must match IO_FIELD in backend.ts.
+// Shared with dsp/engine.h (same names, same values): whichever is included first
+// declares them.
+#ifndef BK_IO_FIELDS_DECLARED
+#define BK_IO_FIELDS_DECLARED
 enum bk_io_field {
   BK_IO_IN_GAIN = 0,
   BK_IO_OUT_GAIN = 1,
@@ -68,6 +72,7 @@ enum bk_io_field {
   BK_IO_SWAP = 5,
   BK_IO_MASTER_MIX = 6
 };
+#endif
 
 // ---------------------------------------------------------------- meter block
 

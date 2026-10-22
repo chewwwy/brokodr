@@ -734,7 +734,7 @@ export class WorkletBackend implements EngineBackend {
   }
 
   padChainCommand(index: number, cmd: Record<string, unknown>): void {
-    this.node?.port.postMessage({ t: "padfx", index, ...cmd });
+    this.node?.port.postMessage({ t: "padfx", index, ...withParamNames(cmd) });
   }
 
   setPadChainParam(index: number, slotId: number, type: string, key: string, value: number): void {
@@ -792,7 +792,7 @@ export class WorkletBackend implements EngineBackend {
 
   loopChainCommand(index: number, cmd: Record<string, unknown>): void {
     // Structural chain edits need strings, so they go by message rather than the ring.
-    this.node?.port.postMessage({ t: "loopfx", index, ...cmd });
+    this.node?.port.postMessage({ t: "loopfx", index, ...withParamNames(cmd) });
   }
 
   setLoopChainParam(index: number, slotId: number, type: string, key: string, value: number): void {
@@ -1260,4 +1260,16 @@ function interleave(l: Float32Array, r: Float32Array): Float32Array {
     out[i * 2 + 1] = r[i];
   }
   return out;
+}
+
+/**
+ * A pad or loop-track chain "add" needs the slot's param name table, exactly as the master
+ * rack's add does: the worklet resolves OP.PADFX / OP.LOOPFX ring keys through
+ * `slot.paramNames[key]`, and a slot added without one ignores every later knob move
+ * (that was the case until Phase 5b: pad and loop effect params only took effect at add
+ * time). Every other op passes through untouched.
+ */
+function withParamNames(cmd: Record<string, unknown>): Record<string, unknown> {
+  if (cmd.op !== "add" || typeof cmd.type !== "string" || cmd.paramNames !== undefined) return cmd;
+  return { ...cmd, paramNames: paramNames(cmd.type) };
 }

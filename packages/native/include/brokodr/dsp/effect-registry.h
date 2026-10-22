@@ -122,6 +122,12 @@ int bk_effect_set_random(int type, void *mem, bk_random_fn fn, void *user);
    Only `pitch` has one today (BK_P_PITCH_QUALITY_KEY). */
 int bk_effect_quality_key(int type);
 
+/* How many params the type has: the length of its param-keys.h list, which is
+   paramNames(type) in param-schema.ts, so a wire key k is valid when
+   0 <= k < this. 0 for a bad type. The worklet's `slot.paramNames[key]`
+   lookup is this bound check. */
+int bk_effect_param_count(int type);
+
 #ifdef __cplusplus
 }
 #endif

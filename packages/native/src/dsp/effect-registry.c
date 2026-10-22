@@ -162,3 +162,31 @@ int bk_effect_quality_key(int type) {
     default: return BK_PARAM_NONE;
   }
 }
+
+int bk_effect_param_count(int type) {
+  switch (type) {
+    case BK_FX_EQ: return BK_P_EQ_COUNT;
+    case BK_FX_COMP: return BK_P_COMP_COUNT;
+    case BK_FX_LIMITER: return BK_P_LIMITER_COUNT;
+    case BK_FX_GATE: return BK_P_GATE_COUNT;
+    case BK_FX_TRANSIENT: return BK_P_TRANSIENT_COUNT;
+    case BK_FX_DIST: return BK_P_DIST_COUNT;
+    case BK_FX_SAT: return BK_P_SAT_COUNT;
+    case BK_FX_CRUSH: return BK_P_CRUSH_COUNT;
+    case BK_FX_PITCH: return BK_P_PITCH_COUNT;
+    case BK_FX_VOCODER: return BK_P_VOCODER_COUNT;
+    case BK_FX_TALKBOX: return BK_P_TALKBOX_COUNT;
+    case BK_FX_CHORUS: return BK_P_CHORUS_COUNT;
+    case BK_FX_FLANGER: return BK_P_FLANGER_COUNT;
+    case BK_FX_PHASER: return BK_P_PHASER_COUNT;
+    case BK_FX_TREMOLO: return BK_P_TREMOLO_COUNT;
+    case BK_FX_RINGMOD: return BK_P_RINGMOD_COUNT;
+    case BK_FX_FREQSHIFT: return BK_P_FREQSHIFT_COUNT;
+    case BK_FX_DELAY: return BK_P_DELAY_COUNT;
+    case BK_FX_REVERB: return BK_P_REVERB_COUNT;
+    case BK_FX_CHARACTER: return BK_P_CHARACTER_COUNT;
+    case BK_FX_GLITCH: return BK_P_GLITCH_COUNT;
+    case BK_FX_NOISE: return BK_P_NOISE_COUNT;
+    default: return 0;
+  }
+}

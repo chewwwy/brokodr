@@ -138,6 +138,35 @@ class CommandRing {
     return n;
   }
 
+  /**
+   * Drain commands with an absolute index below `limit`, and no further than what is
+   * published now. This is how a structural message posted after command N lands after
+   * command N and before N+1: the poster records writeIndex() as the message's fence,
+   * the consumer drains to that fence, then applies the message. Returns how many ran.
+   */
+  template <typename Fn>
+  uint32_t drainUntil(uint64_t limit, Fn&& apply) {
+    const uint64_t w = write_.load(std::memory_order_acquire);
+    const uint64_t end = limit < w ? limit : w;
+    uint64_t r = read_.load(std::memory_order_relaxed);
+    uint32_t n = 0;
+    Command c{};
+    while (r < end) {
+      const double* slot = &data_[(r % kSlots) * kStride];
+      c.op = slot[0];
+      c.id = slot[1];
+      c.key = slot[2];
+      c.value = slot[3];
+      c.aux1 = slot[4];
+      c.aux2 = slot[5];
+      apply(c);
+      r++;
+      n++;
+    }
+    read_.store(r, std::memory_order_release);
+    return n;
+  }
+
   /** Published-but-unread commands. Diagnostic only; never gate audio work on it. */
   uint32_t pending() const {
     const uint64_t w = write_.load(std::memory_order_acquire);

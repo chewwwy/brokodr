@@ -44,6 +44,10 @@
 
 #include "brokodr/dsp/utils.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* MAX_SLOTS in chain.js. Hard ceiling on one chain; the master rack and the
    pads share it. A bk_chain may be configured lower but never higher, so the
    inline slot array below is always big enough. */
@@ -204,5 +208,9 @@ int bk_chain_read_slot_meters(const bk_chain *c, double *out, int offset);
  * crossfade entirely, which is the common path and saves a pass over the block.
  */
 void bk_chain_process(bk_chain *c, float *l, float *r, int frames);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BROKODR_DSP_CHAIN_H */
